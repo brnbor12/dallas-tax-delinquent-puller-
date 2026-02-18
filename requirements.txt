@@ -2,5 +2,4 @@ fastapi==0.115.6
 uvicorn[standard]==0.32.1
 requests==2.32.3
 python-dotenv==1.0.1
-grep -q "google-cloud-storage" requirements.txt || echo "google-cloud-storage" >> requirements.txt
-cat requirements.txt
+google-cloud-storage
