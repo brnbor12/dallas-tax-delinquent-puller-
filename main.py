@@ -1,5 +1,13 @@
 import os
 import re
+
+def is_unit_only_line(line: str) -> bool:
+    if not line:
+        return False
+    t = line.strip().lower()
+    # unit-only patterns like "STE 200", "SUITE 4", "APT 12", "# 300"
+    return bool(re.match(r'^(#\s*\w+|(ste|suite|apt|unit)\b\s*\w+)$', t))
+
 import io
 import csv
 import gzip
