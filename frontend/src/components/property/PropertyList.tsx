@@ -24,7 +24,7 @@ export function PropertyList() {
     )
   }
 
-  const { results = [], total = 0, page: currentPage, page_size } = data ?? {}
+  const { results = [], total = 0, page: currentPage = 1, page_size } = data ?? {}
 
   return (
     <div className="flex h-full flex-col">

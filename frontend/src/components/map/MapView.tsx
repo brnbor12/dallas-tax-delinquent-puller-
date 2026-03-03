@@ -137,8 +137,8 @@ export function MapView() {
         const features = map.queryRenderedFeatures(e.point, { layers: ['clusters'] })
         const clusterId = features[0]?.properties?.cluster_id
         const source = map.getSource('properties') as maplibregl.GeoJSONSource
-        source.getClusterExpansionZoom(clusterId, (err, zoom) => {
-          if (err || !zoom) return
+        source.getClusterExpansionZoom(clusterId).then((zoom) => {
+          if (!zoom) return
           const coords = (features[0].geometry as GeoJSON.Point).coordinates as [number, number]
           map.easeTo({ center: coords, zoom })
         })
