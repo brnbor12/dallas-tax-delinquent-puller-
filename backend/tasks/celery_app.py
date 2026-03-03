@@ -95,6 +95,27 @@ app.conf.beat_schedule = {
         "kwargs": {"scraper_key": "tx_dallas_lis_pendens"},
         "options": {"queue": "web_scrape"},
     },
+    # Dallas County — probate (active estates, 2-year lookback, run weekly)
+    "tx-dallas-probate-weekly": {
+        "task": "tasks.scrape_tasks.run_web_scraper",
+        "schedule": 604800,
+        "kwargs": {"scraper_key": "tx_dallas_probate"},
+        "options": {"queue": "web_scrape"},
+    },
+    # Dallas County — eviction FED (active filings, 90-day lookback, run daily)
+    "tx-dallas-eviction-daily": {
+        "task": "tasks.scrape_tasks.run_web_scraper",
+        "schedule": 86400,
+        "kwargs": {"scraper_key": "tx_dallas_eviction_fed"},
+        "options": {"queue": "web_scrape"},
+    },
+    # Dallas County — divorce (active FAM cases, 180-day lookback, run weekly)
+    "tx-dallas-divorce-weekly": {
+        "task": "tasks.scrape_tasks.run_web_scraper",
+        "schedule": 604800,
+        "kwargs": {"scraper_key": "tx_dallas_divorce"},
+        "options": {"queue": "web_scrape"},
+    },
     # Dallas County — tax delinquent roll (updated weekly on Fridays)
     "tx-dallas-tax-weekly": {
         "task": "tasks.scrape_tasks.run_county_api_scraper",

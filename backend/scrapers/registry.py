@@ -20,6 +20,7 @@ from scrapers.counties.texas.dallas_code_enforcement import DallasCodeEnforcemen
 from scrapers.counties.texas.dallas_probate import DallasProbateScraper
 from scrapers.counties.texas.dallas_eviction import DallasEvictionScraper
 from scrapers.counties.texas.dallas_lis_pendens import DallasLisPendensScraper
+from scrapers.counties.texas.dallas_divorce import DallasDivorceScraper
 
 SCRAPER_REGISTRY: dict[str, type[BaseCountyScraper]] = {
     # Texas — Dallas County
@@ -29,6 +30,7 @@ SCRAPER_REGISTRY: dict[str, type[BaseCountyScraper]] = {
     "tx_dallas_probate":            DallasProbateScraper,
     "tx_dallas_eviction_fed":       DallasEvictionScraper,
     "tx_dallas_lis_pendens":        DallasLisPendensScraper,
+    "tx_dallas_divorce":            DallasDivorceScraper,
     # Florida — Hillsborough County
     "fl_hillsborough_foreclosure": HillsboroughForeclosureScraper,
     # Florida — Polk County
