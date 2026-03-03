@@ -1,0 +1,22 @@
+# Official Microsoft Playwright Python image — Chromium + all system deps
+# pre-installed and tested on Ubuntu 22.04 (Jammy).
+# Python version: 3.10 (from ubuntu:jammy); compatible with our codebase
+# (all files use `from __future__ import annotations` for 3.10+ compat).
+FROM mcr.microsoft.com/playwright/python:v1.49.0-jammy
+
+# Additional system deps for psycopg2-binary
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.txt .
+# playwright is already installed in the base image; pip will skip/reuse it.
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Chromium browser binary is pre-installed at /ms-playwright/chromium-*/
+# No further `playwright install` needed.
+
+COPY . .

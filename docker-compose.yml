@@ -1,0 +1,137 @@
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-seller}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-seller_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-motivated_seller}
+    command: postgres -c max_connections=200
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U seller -d motivated_seller"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: ../docker/Dockerfile.api
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: ../docker/Dockerfile.api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PYTHONPATH: /app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    command: celery -A tasks.celery_app worker --loglevel=info -Q county_api,mls,default
+
+  playwright-worker:
+    build:
+      context: ./backend
+      dockerfile: ../docker/Dockerfile.playwright
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PYTHONPATH: /app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    command: celery -A tasks.celery_app worker --loglevel=info -Q web_scrape --concurrency=2
+
+  beat:
+    build:
+      context: ./backend
+      dockerfile: ../docker/Dockerfile.api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PYTHONPATH: /app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    command: celery -A tasks.celery_app beat --loglevel=info
+
+  flower:
+    build:
+      context: ./backend
+      dockerfile: ../docker/Dockerfile.api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PYTHONPATH: /app
+    ports:
+      - "5555:5555"
+    depends_on:
+      - redis
+    volumes:
+      - ./backend:/app
+    command: celery -A tasks.celery_app flower --port=5555
+
+  martin:
+    image: ghcr.io/maplibre/martin:v0.13.0
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-seller}:${POSTGRES_PASSWORD:-seller_pass}@db:5432/${POSTGRES_DB:-motivated_seller}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - api
+      - martin
+
+volumes:
+  pgdata:

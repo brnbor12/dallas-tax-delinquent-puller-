@@ -1,0 +1,40 @@
+# Web framework
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+python-multipart==0.0.20
+
+# Database
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+alembic==1.14.0
+psycopg2-binary==2.9.10
+geoalchemy2==0.17.0
+
+# Task queue
+celery==5.4.0
+redis==5.2.1
+flower==2.0.1
+
+# Scraping
+httpx==0.28.1
+beautifulsoup4==4.12.3
+lxml==5.3.0
+pdfplumber==0.11.4
+playwright==1.49.0
+
+# Data
+pandas==2.2.3
+pydantic==2.10.4
+pydantic-settings==2.7.0
+
+# Auth (Clerk JWT verification)
+PyJWT==2.10.1
+cryptography==44.0.0
+
+# Geo
+shapely==2.0.6
+
+# Utils
+python-dateutil==2.9.0.post0
+tenacity==9.0.0
+structlog==24.4.0
