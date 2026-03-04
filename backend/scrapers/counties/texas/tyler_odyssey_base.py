@@ -330,7 +330,15 @@ class TylerOdysseyPlaywrightScraper(PlaywrightBaseScraper):
                     headers=headers,
                 )
                 if resp.status != 200:
-                    logger.warning("odyssey_search_bad_status", status=resp.status)
+                    body = await resp.text()
+                    logger.warning(
+                        "odyssey_search_bad_status",
+                        portal=self.portal_base,
+                        status=resp.status,
+                        node_id=search_payload.get("nodeId"),
+                        category=category,
+                        body=body[:400],
+                    )
                     return []
                 data = await resp.json()
             except Exception as exc:

@@ -44,6 +44,9 @@ COUNTY_FIPS = "48113"
 PORTAL_BASE = "https://courtsportal.dallascounty.org/DALLASPROD"
 LOOKBACK_DAYS = 730  # 2 years — probate estates are long-running
 
+# nodeId values to try (Dallas County ePortal uses full strings from location dropdown)
+_NODE_IDS = ["County Courts - Probate", "PROBATE", "PR", "", "29"]
+
 # Party role substrings that identify the decedent / property owner
 _DECEDENT_ROLES = {
     "DECEDENT", "TESTATOR", "DECEASED", "ESTATE", "WARD", "DECEDANT",
@@ -88,13 +91,19 @@ class DallasProbateScraper(TylerOdysseyPlaywrightScraper):
     rate_limit_per_minute = 15
 
     async def fetch_records(self, **kwargs) -> AsyncIterator[RawIndicatorRecord]:
-        pairs = await self._get_cases_with_details(
-            category="PR",
-            node_id="PROBATE",
-            status_type="A",
-            lookback_days=LOOKBACK_DAYS,
-            detail_node_id="PROBATE",
-        )
+        pairs = await self._try_search()
+
+        if not pairs:
+            logger.warning(
+                "dallas_probate_no_cases",
+                hint=(
+                    "No probate cases found on any nodeId/category combination. "
+                    "Open courtsportal.dallascounty.org/DALLASPROD in a browser, "
+                    "search a known probate case, and check DevTools → Network for "
+                    "the actual CaseSearch request payload to verify nodeId and category."
+                ),
+            )
+            return
 
         total = 0
         for case, detail in pairs:
@@ -104,6 +113,27 @@ class DallasProbateScraper(TylerOdysseyPlaywrightScraper):
                 total += 1
 
         logger.info("dallas_probate_complete", total_yielded=total)
+
+    async def _try_search(self) -> list[tuple[dict, dict]]:
+        """Try multiple nodeId and category combinations until one returns results."""
+        for node_id in _NODE_IDS:
+            for category in ["PR", "CV", "FAM"]:
+                pairs = await self._get_cases_with_details(
+                    category=category,
+                    node_id=node_id,
+                    status_type="A",
+                    lookback_days=LOOKBACK_DAYS,
+                    detail_node_id=node_id,
+                )
+                if pairs:
+                    logger.info(
+                        "dallas_probate_hit",
+                        node_id=node_id,
+                        category=category,
+                        count=len(pairs),
+                    )
+                    return pairs
+        return []
 
     def _build_record(self, case: dict, detail: dict) -> RawIndicatorRecord | None:
         case_number = _coerce(case, "CaseNumber", "caseNumber", "case_number")

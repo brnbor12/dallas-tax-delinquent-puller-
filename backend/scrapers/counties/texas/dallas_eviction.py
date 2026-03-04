@@ -111,29 +111,35 @@ class DallasEvictionScraper(TylerOdysseyPlaywrightScraper):
     async def _try_portals(self) -> list[tuple[dict, dict]]:
         """
         Try JP portal first, then county clerk portal fallback.
-        Also tries multiple FED case type codes on each portal.
+        Tries multiple node IDs and FED case type codes on each portal.
+        Dallas ePortal uses full location strings like "Justice of the Peace Courts".
         """
-        for portal_base, node_id in [
-            (JP_PORTAL_BASE, "JP"),
-            (CC_PORTAL_BASE, "JP"),
+        jp_node_ids = ["Justice of the Peace Courts", "JP", "JPC", ""]
+        cc_node_ids = ["Justice of the Peace Courts", "JP", "JPC", ""]
+
+        for portal_base, node_ids in [
+            (JP_PORTAL_BASE, jp_node_ids),
+            (CC_PORTAL_BASE, cc_node_ids),
         ]:
             self.portal_base = portal_base
-            for case_type in _FED_CASE_TYPES:
-                pairs = await self._get_cases_with_details(
-                    category="CV",
-                    node_id=node_id,
-                    status_type="A",
-                    lookback_days=LOOKBACK_DAYS,
-                    case_type_id=case_type,
-                )
-                if pairs:
-                    logger.info(
-                        "dallas_eviction_portal_hit",
-                        portal=portal_base,
-                        case_type=case_type,
-                        count=len(pairs),
+            for node_id in node_ids:
+                for case_type in _FED_CASE_TYPES:
+                    pairs = await self._get_cases_with_details(
+                        category="CV",
+                        node_id=node_id,
+                        status_type="A",
+                        lookback_days=LOOKBACK_DAYS,
+                        case_type_id=case_type,
                     )
-                    return pairs
+                    if pairs:
+                        logger.info(
+                            "dallas_eviction_portal_hit",
+                            portal=portal_base,
+                            node_id=node_id,
+                            case_type=case_type,
+                            count=len(pairs),
+                        )
+                        return pairs
 
         return []
 

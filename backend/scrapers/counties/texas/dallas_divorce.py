@@ -56,8 +56,8 @@ COUNTY_FIPS = "48113"
 PORTAL_BASE = "https://courtsportal.dallascounty.org/DALLASPROD"
 LOOKBACK_DAYS = 180
 
-# nodeId values to try for District Clerk (Odyssey config varies)
-_NODE_IDS = ["DISTRICT", "DCCV", "DC", "DISTRICTCLERK"]
+# nodeId values to try — Dallas ePortal uses full location strings from dropdown
+_NODE_IDS = ["District Courts - Family", "DISTRICT", "DCCV", "DC", "DISTRICTCLERK", ""]
 
 # Case type codes to try for divorce/family
 _DIVORCE_CASE_TYPES = ["DIV", "DIVM", "FAM", "DIVP"]
