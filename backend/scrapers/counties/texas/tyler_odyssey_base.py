@@ -322,6 +322,19 @@ class TylerOdysseyPlaywrightScraper(PlaywrightBaseScraper):
                 )
                 return []
 
+            # Step 2b: Navigate to the case search page to set session context
+            # Some Odyssey deployments require visiting a search page before
+            # the API will accept requests.
+            try:
+                await page.goto(
+                    self.portal_base + "/Home/Dashboard/29",
+                    wait_until="domcontentloaded",
+                    timeout=15_000,
+                )
+                await asyncio.sleep(1)
+            except Exception:
+                pass  # non-fatal — Smart Search page, best-effort
+
             # Case search
             try:
                 resp = await ctx.request.post(
@@ -331,13 +344,15 @@ class TylerOdysseyPlaywrightScraper(PlaywrightBaseScraper):
                 )
                 if resp.status != 200:
                     body = await resp.text()
+                    # Extract the key part of the error (after CSS styles)
+                    body_snippet = body[body.find("<h2>"):body.find("<h2>") + 600] if "<h2>" in body else body[:600]
                     logger.warning(
                         "odyssey_search_bad_status",
                         portal=self.portal_base,
                         status=resp.status,
                         node_id=search_payload.get("nodeId"),
                         category=category,
-                        body=body[:400],
+                        body=body_snippet,
                     )
                     return []
                 data = await resp.json()
