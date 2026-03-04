@@ -53,7 +53,7 @@ from scrapers.counties.texas.tyler_odyssey_base import TylerOdysseyPlaywrightScr
 logger = structlog.get_logger(__name__)
 
 COUNTY_FIPS = "48113"
-PORTAL_BASE = "https://portal.co.dallas.tx.us"
+PORTAL_BASE = "https://courtsportal.dallascounty.org/DALLASPROD"
 LOOKBACK_DAYS = 180
 
 # nodeId values to try for District Clerk (Odyssey config varies)

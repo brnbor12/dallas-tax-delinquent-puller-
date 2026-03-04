@@ -41,7 +41,7 @@ logger = structlog.get_logger(__name__)
 
 COUNTY_FIPS = "48113"
 JP_PORTAL_BASE = "https://dcdjp.dallascounty.org"
-CC_PORTAL_BASE = "https://portal.co.dallas.tx.us"
+CC_PORTAL_BASE = "https://courtsportal.dallascounty.org/DALLASPROD"
 LOOKBACK_DAYS = 90  # evictions resolve quickly
 
 # Possible case type codes for FED across Odyssey versions

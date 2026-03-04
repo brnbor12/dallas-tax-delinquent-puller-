@@ -41,7 +41,7 @@ from scrapers.counties.texas.tyler_odyssey_base import TylerOdysseyPlaywrightScr
 logger = structlog.get_logger(__name__)
 
 COUNTY_FIPS = "48113"
-PORTAL_BASE = "https://portal.co.dallas.tx.us"
+PORTAL_BASE = "https://courtsportal.dallascounty.org/DALLASPROD"
 LOOKBACK_DAYS = 730  # 2 years — probate estates are long-running
 
 # Party role substrings that identify the decedent / property owner

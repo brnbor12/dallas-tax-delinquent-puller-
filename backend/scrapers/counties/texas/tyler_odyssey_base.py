@@ -14,7 +14,7 @@ Subclass TylerOdysseyPlaywrightScraper and set `portal_base`.  Call
 `_get_case_detail()` per case to enrich with party addresses.
 
     class MyProbateScraper(TylerOdysseyPlaywrightScraper):
-        portal_base = "https://portal.co.dallas.tx.us"
+        portal_base = "https://courtsportal.dallascounty.org/DALLASPROD"
         county_fips = "48113"
         ...
         async def fetch_records(self, **kwargs):
