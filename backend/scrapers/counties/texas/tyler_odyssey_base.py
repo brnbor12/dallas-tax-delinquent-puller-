@@ -335,29 +335,76 @@ class TylerOdysseyPlaywrightScraper(PlaywrightBaseScraper):
             except Exception:
                 pass  # non-fatal — Smart Search page, best-effort
 
-            # Case search
+            # Case search — try browser-native fetch() first (sends proper
+            # Sec-Fetch-* headers that ASP.NET MVC checks), fall back to
+            # ctx.request.post() if the page.evaluate approach fails.
+            data = None
             try:
-                resp = await ctx.request.post(
-                    self.portal_base + _SEARCH_PATH,
-                    data=json.dumps(search_payload),
-                    headers=headers,
+                search_url = self.portal_base + _SEARCH_PATH
+                result = await page.evaluate(
+                    """async ([url, payload]) => {
+                        try {
+                            const resp = await fetch(url, {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                    'Accept': 'application/json, text/plain, */*',
+                                },
+                                body: JSON.stringify(payload),
+                                credentials: 'include',
+                            });
+                            const text = await resp.text();
+                            return {status: resp.status, body: text};
+                        } catch(e) {
+                            return {status: 0, body: String(e)};
+                        }
+                    }""",
+                    [search_url, search_payload],
                 )
-                if resp.status != 200:
-                    body = await resp.text()
-                    # Extract the key part of the error (after CSS styles)
-                    body_snippet = body[body.find("<h2>"):body.find("<h2>") + 600] if "<h2>" in body else body[:600]
+                status = result.get("status", 0)
+                body_text = result.get("body", "")
+                if status == 200:
+                    import json as _json
+                    data = _json.loads(body_text)
+                else:
+                    body_snippet = body_text[body_text.find("<h2>"):body_text.find("<h2>") + 400] if "<h2>" in body_text else body_text[:400]
                     logger.warning(
                         "odyssey_search_bad_status",
                         portal=self.portal_base,
-                        status=resp.status,
+                        status=status,
                         node_id=search_payload.get("nodeId"),
                         category=category,
                         body=body_snippet,
+                        method="fetch",
                     )
-                    return []
-                data = await resp.json()
             except Exception as exc:
-                logger.error("odyssey_search_failed", error=str(exc)[:200])
+                logger.debug("odyssey_fetch_fallback", error=str(exc)[:100])
+                # Fall back to ctx.request.post()
+                try:
+                    resp = await ctx.request.post(
+                        self.portal_base + _SEARCH_PATH,
+                        data=json.dumps(search_payload),
+                        headers=headers,
+                    )
+                    if resp.status != 200:
+                        body = await resp.text()
+                        body_snippet = body[body.find("<h2>"):body.find("<h2>") + 400] if "<h2>" in body else body[:400]
+                        logger.warning(
+                            "odyssey_search_bad_status",
+                            portal=self.portal_base,
+                            status=resp.status,
+                            node_id=search_payload.get("nodeId"),
+                            category=category,
+                            body=body_snippet,
+                            method="ctx_request",
+                        )
+                        return []
+                    data = await resp.json()
+                except Exception as exc2:
+                    logger.error("odyssey_search_failed", error=str(exc2)[:200])
+                    return []
+
+            if data is None:
                 return []
 
             cases = _extract_cases(data)
