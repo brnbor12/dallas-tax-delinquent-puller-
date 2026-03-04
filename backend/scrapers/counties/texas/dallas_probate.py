@@ -31,6 +31,7 @@ Rate: 15 req/min via BaseCountyScraper._rate_limit_sleep().
 
 from __future__ import annotations
 
+import re
 import structlog
 from datetime import date, datetime
 from typing import AsyncIterator
@@ -95,14 +96,11 @@ class DallasProbateScraper(TylerOdysseyPlaywrightScraper):
 
         if not pairs:
             logger.warning(
-                "dallas_probate_no_cases",
-                hint=(
-                    "No probate cases found on any nodeId/category combination. "
-                    "Open courtsportal.dallascounty.org/DALLASPROD in a browser, "
-                    "search a known probate case, and check DevTools → Network for "
-                    "the actual CaseSearch request payload to verify nodeId and category."
-                ),
+                "dallas_probate_api_exhausted",
+                hint="CaseSearch API failed — falling back to Hearing Search UI",
             )
+            async for record in self._fetch_via_hearing_search():
+                yield record
             return
 
         total = 0
@@ -113,6 +111,95 @@ class DallasProbateScraper(TylerOdysseyPlaywrightScraper):
                 total += 1
 
         logger.info("dallas_probate_complete", total_yielded=total)
+
+    async def _fetch_via_hearing_search(self) -> AsyncIterator[RawIndicatorRecord]:
+        """Fallback: scrape Hearing Search UI for probate court hearings."""
+        cases = await self._get_cases_via_hearing_search(
+            court_location="County Courts - Probate",
+            lookback_days=60,
+            lookahead_days=90,
+        )
+        if not cases:
+            logger.warning("dallas_probate_hearing_search_empty")
+            return
+
+        total = 0
+        for row in cases:
+            record = self._build_record_from_hearing_row(row)
+            if record and await self.validate_record(record):
+                yield record
+                total += 1
+                await self._rate_limit_sleep()
+
+        logger.info("dallas_probate_hearing_complete", total_yielded=total)
+
+    def _build_record_from_hearing_row(self, row: dict) -> RawIndicatorRecord | None:
+        """Build RawIndicatorRecord from a Hearing Search table row."""
+        # Try common column name variations for case number and style
+        case_number = ""
+        for k in row:
+            if re.search(r"case.?no|case.?number|casenum", k, re.I):
+                case_number = str(row[k]).strip()
+                break
+
+        style_name = ""
+        for k in row:
+            if re.search(r"style|name|caption|parties", k, re.I):
+                style_name = str(row[k]).strip()
+                break
+
+        if not case_number:
+            return None
+
+        # Attempt to get case detail URL from href columns
+        case_url = ""
+        for k in row:
+            if k.endswith("_href") and row[k]:
+                case_url = str(row[k])
+                break
+
+        # Hearing date
+        hearing_date_str = ""
+        for k in row:
+            if re.search(r"hearing.?date|date|scheduled", k, re.I) and not k.endswith("_href"):
+                hearing_date_str = str(row[k]).strip()
+                break
+
+        filing_date: date | None = None
+        if hearing_date_str:
+            for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m-%d-%Y"):
+                try:
+                    filing_date = datetime.strptime(hearing_date_str[:10], fmt).date()
+                    break
+                except ValueError:
+                    continue
+
+        # Owner name from style ("ESTATE OF JOHN DOE" → "John Doe")
+        owner_name: str | None = None
+        upper = style_name.upper()
+        if upper.startswith("ESTATE OF "):
+            owner_name = style_name[10:].strip().title()
+        elif style_name:
+            owner_name = style_name.title()
+
+        address_raw = case_url or f"Probate {case_number}, Dallas County, TX"
+
+        return RawIndicatorRecord(
+            indicator_type="probate",
+            address_raw=address_raw,
+            county_fips=self.county_fips,
+            owner_name=owner_name,
+            filing_date=filing_date,
+            case_number=case_number,
+            source_url=f"{PORTAL_BASE}/",
+            raw_payload={
+                "case_number": case_number,
+                "style_name": style_name,
+                "case_url": case_url,
+                "source": "hearing_search",
+                **{k: v for k, v in row.items() if not k.startswith("_")},
+            },
+        )
 
     async def _try_search(self) -> list[tuple[dict, dict]]:
         """Try multiple nodeId and category combinations until one returns results."""

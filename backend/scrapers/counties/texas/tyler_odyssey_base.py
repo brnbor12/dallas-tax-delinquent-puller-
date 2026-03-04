@@ -37,9 +37,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import structlog
 from datetime import date, timedelta
 from typing import Any
+
+from bs4 import BeautifulSoup
 
 from scrapers.playwright_base import PlaywrightBaseScraper
 
@@ -448,3 +451,307 @@ class TylerOdysseyPlaywrightScraper(PlaywrightBaseScraper):
                 results.append((case, detail))
 
         return results
+
+    # ------------------------------------------------------------------
+    # Hearing Search UI fallback
+    # ------------------------------------------------------------------
+
+    async def _get_cases_via_hearing_search(
+        self,
+        court_location: str,
+        lookback_days: int = 30,
+        lookahead_days: int = 90,
+        max_cases: int = 200,
+    ) -> list[dict]:
+        """
+        Fallback scraper: interacts with Hearing Search (Dashboard/26) via
+        Playwright browser UI instead of the broken REST API.
+
+        Dashboard/26 has CaptchaEnabled=False so no reCAPTCHA is needed.
+        Results come from an HTML table rendered after form submission.
+
+        Returns list of dicts:
+            case_number, case_style, case_url, hearing_date, court_location
+        """
+        if not self.portal_base:
+            raise ValueError("portal_base must be set")
+
+        search_url = f"{self.portal_base}/Home/Dashboard/26"
+        date_from = (date.today() - timedelta(days=lookback_days)).strftime("%m/%d/%Y")
+        date_to = (date.today() + timedelta(days=lookahead_days)).strftime("%m/%d/%Y")
+
+        async with self.browser_context() as ctx:
+            page = await ctx.new_page()
+
+            # Establish portal session first
+            try:
+                await page.goto(
+                    self.portal_base + "/",
+                    wait_until="domcontentloaded",
+                    timeout=30_000,
+                )
+                await asyncio.sleep(1)
+            except Exception as exc:
+                logger.error(
+                    "odyssey_portal_unreachable",
+                    portal=self.portal_base,
+                    error=str(exc)[:200],
+                )
+                return []
+
+            # Navigate to Hearing Search
+            try:
+                await page.goto(search_url, wait_until="domcontentloaded", timeout=30_000)
+                await asyncio.sleep(2)
+            except Exception as exc:
+                logger.error(
+                    "odyssey_hearing_load_failed",
+                    url=search_url,
+                    error=str(exc)[:200],
+                )
+                return []
+
+            logger.info(
+                "odyssey_hearing_page_loaded",
+                title=await page.title(),
+                url=page.url,
+            )
+
+            # Dump all select elements and their options for diagnosis on first call
+            try:
+                select_info = await page.evaluate("""
+                    () => Array.from(document.querySelectorAll('select')).map(s => ({
+                        id: s.id, name: s.name, count: s.options.length,
+                        options: Array.from(s.options).map(o => ({v: o.value, t: o.text})).slice(0, 20)
+                    }))
+                """)
+                logger.info("odyssey_hearing_selects", selects=select_info)
+            except Exception:
+                pass
+
+            # Try to set court location via select (handles hidden Kendo selects too)
+            location_set = False
+            try:
+                # Use JavaScript to find and set the location select with matching option
+                location_set = await page.evaluate(
+                    """([target]) => {
+                        for (const sel of document.querySelectorAll('select')) {
+                            for (const opt of sel.options) {
+                                if (opt.value === target || opt.text.trim() === target) {
+                                    sel.value = opt.value;
+                                    sel.dispatchEvent(new Event('change', {bubbles: true}));
+                                    // Notify Kendo if present
+                                    if (window.$ && $(sel).data('kendoDropDownList')) {
+                                        $(sel).data('kendoDropDownList').value(opt.value);
+                                        $(sel).data('kendoDropDownList').trigger('change');
+                                    }
+                                    return true;
+                                }
+                            }
+                        }
+                        return false;
+                    }""",
+                    [court_location],
+                )
+            except Exception as exc:
+                logger.debug("odyssey_hearing_location_js_error", error=str(exc)[:100])
+
+            logger.info(
+                "odyssey_hearing_location_set",
+                court_location=court_location,
+                success=location_set,
+            )
+
+            # Fill hearing date range
+            for field_patterns, value in [
+                (
+                    ["HearingDateFrom", "hearingDateFrom", "StartDate", "startDate", "DateFrom", "dateFrom"],
+                    date_from,
+                ),
+                (
+                    ["HearingDateTo", "hearingDateTo", "EndDate", "endDate", "DateTo", "dateTo"],
+                    date_to,
+                ),
+            ]:
+                filled = False
+                for pat in field_patterns:
+                    try:
+                        sel = f"input[name='{pat}'], input[id='{pat}']"
+                        count = await page.locator(sel).count()
+                        if count > 0:
+                            await page.fill(sel, value)
+                            filled = True
+                            break
+                    except Exception:
+                        continue
+                # Generic fallback: look for any date input
+                if not filled:
+                    try:
+                        date_inputs = await page.evaluate(
+                            "() => Array.from(document.querySelectorAll('input[type=\"text\"], input[type=\"date\"]'))"
+                            ".filter(i => /date/i.test(i.name + i.id + i.placeholder))"
+                            ".map(i => ({name: i.name, id: i.id}))"
+                        )
+                        logger.debug("odyssey_hearing_date_inputs_found", inputs=date_inputs)
+                    except Exception:
+                        pass
+
+            # Click the search button
+            submitted = False
+            for btn_text in ["Search", "Find", "Submit"]:
+                for sel in [
+                    f"button:has-text('{btn_text}')",
+                    f"input[value='{btn_text}']",
+                    f"a:has-text('{btn_text}')",
+                ]:
+                    try:
+                        loc = page.locator(sel).first
+                        count = await page.locator(sel).count()
+                        if count > 0:
+                            await loc.click()
+                            submitted = True
+                            logger.info("odyssey_hearing_submitted", selector=sel)
+                            break
+                    except Exception:
+                        continue
+                if submitted:
+                    break
+
+            if not submitted:
+                # Try any submit button
+                try:
+                    await page.locator("button[type='submit']").first.click()
+                    submitted = True
+                    logger.info("odyssey_hearing_submitted", selector="button[type=submit]")
+                except Exception:
+                    pass
+
+            if not submitted:
+                logger.warning("odyssey_hearing_no_submit_found")
+                return []
+
+            # Wait for results to load
+            try:
+                await page.wait_for_load_state("networkidle", timeout=20_000)
+            except Exception:
+                await asyncio.sleep(4)
+
+            current_url = page.url
+            logger.info("odyssey_hearing_after_submit_url", url=current_url)
+
+            # Get results HTML
+            html = await page.content()
+
+            cases = self._parse_hearing_table(html, court_location)
+            logger.info(
+                "odyssey_hearing_cases_parsed",
+                count=len(cases),
+                court_location=court_location,
+            )
+            return cases[:max_cases]
+
+    def _parse_hearing_table(self, html: str, court_location: str) -> list[dict]:
+        """
+        Parse Hearing Search result HTML into a list of case dicts.
+        Handles various Tyler ePortal table structures.
+        """
+        soup = BeautifulSoup(html, "lxml")
+        results: list[dict] = []
+
+        # Look for any table with case-related headers
+        for table in soup.find_all("table"):
+            ths = table.find_all("th")
+            headers = [th.get_text(strip=True) for th in ths]
+            if not headers:
+                # Try to infer from first row
+                first_row = table.find("tr")
+                if first_row:
+                    headers = [td.get_text(strip=True) for td in first_row.find_all(["td", "th"])]
+
+            h_lower = " ".join(h.lower() for h in headers)
+            # Only process tables that look like case/hearing results
+            if not any(kw in h_lower for kw in ["case", "style", "party", "hearing", "number"]):
+                continue
+
+            for row in table.find_all("tr"):
+                cells = row.find_all("td")
+                if not cells:
+                    continue
+                row_data: dict = {"_court_location": court_location}
+                for i, cell in enumerate(cells):
+                    col = headers[i] if i < len(headers) else f"col_{i}"
+                    row_data[col] = cell.get_text(strip=True)
+                    # Grab href from case number link
+                    link = cell.find("a", href=True)
+                    if link:
+                        href = link["href"]
+                        if not href.startswith("http"):
+                            href = self.portal_base.rstrip("/") + "/" + href.lstrip("/")
+                        row_data[f"{col}_href"] = href
+                        # Prefer link text as value for case number fields
+                        if not row_data[col]:
+                            row_data[col] = link.get_text(strip=True)
+
+                # Only keep rows that have something that looks like a case number
+                combined_text = " ".join(str(v) for v in row_data.values())
+                if re.search(r"\d{2}-\d{4,}", combined_text) or re.search(r"[A-Z]{2,}-\d{2}", combined_text):
+                    results.append(row_data)
+
+        # If no structured table found, try a Kendo grid data extraction via JSON
+        if not results:
+            # Tyler ePortal sometimes embeds grid data as JSON in a script tag
+            for script in soup.find_all("script"):
+                text = script.string or ""
+                if '"CaseNumber"' in text or '"caseNumber"' in text:
+                    try:
+                        # Extract JSON array from script
+                        m = re.search(r'\[(\{[^;]+\})\]', text, re.DOTALL)
+                        if m:
+                            data = json.loads(f"[{m.group(1)}]")
+                            results = [dict(r, _court_location=court_location) for r in data]
+                            break
+                    except Exception:
+                        pass
+
+        return results
+
+    async def _get_address_from_case_page(self, case_url: str) -> str | None:
+        """
+        Navigate to a case detail page URL and attempt to extract a property address.
+        Returns the first address-like string found in party sections, or None.
+        """
+        if not case_url:
+            return None
+
+        async with self.browser_context() as ctx:
+            page = await ctx.new_page()
+            try:
+                await page.goto(case_url, wait_until="domcontentloaded", timeout=30_000)
+                await asyncio.sleep(2)
+                html = await page.content()
+            except Exception as exc:
+                logger.debug("odyssey_case_page_failed", url=case_url, error=str(exc)[:100])
+                return None
+
+        soup = BeautifulSoup(html, "lxml")
+
+        # Look for address-like text in party sections
+        addr_pattern = re.compile(r"\d+\s+\w+.{0,60}(?:ST|AVE|BLVD|DR|LN|RD|WAY|CIR|CT|PKWY|HWY)[,\s]", re.I)
+
+        # Try: tables, divs with class/id containing "party" or "address"
+        for container in soup.find_all(
+            ["div", "section", "table", "p"],
+            class_=re.compile(r"party|address|contact", re.I),
+        ):
+            text = container.get_text(" ", strip=True)
+            m = addr_pattern.search(text)
+            if m:
+                return m.group(0).strip()
+
+        # Fallback: scan all text nodes
+        full_text = soup.get_text(" ")
+        m = addr_pattern.search(full_text)
+        if m:
+            return m.group(0).strip()
+
+        return None

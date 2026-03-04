@@ -43,6 +43,7 @@ Note:   If this scraper returns 0 results, verify the nodeId and category
 
 from __future__ import annotations
 
+import re
 import structlog
 from datetime import date, datetime
 from typing import AsyncIterator
@@ -105,13 +106,11 @@ class DallasDivorceScraper(TylerOdysseyPlaywrightScraper):
 
         if not pairs:
             logger.warning(
-                "dallas_divorce_no_cases",
-                hint=(
-                    "No divorce cases found. Open portal.co.dallas.tx.us, search "
-                    "a known divorce case, and check DevTools → Network for the "
-                    "CaseSearch request to verify nodeId and category values."
-                ),
+                "dallas_divorce_api_exhausted",
+                hint="CaseSearch API failed — falling back to Hearing Search UI",
             )
+            async for record in self._fetch_via_hearing_search():
+                yield record
             return
 
         total = 0
@@ -122,6 +121,92 @@ class DallasDivorceScraper(TylerOdysseyPlaywrightScraper):
                 total += 1
 
         logger.info("dallas_divorce_complete", total_yielded=total)
+
+    async def _fetch_via_hearing_search(self) -> AsyncIterator[RawIndicatorRecord]:
+        """Fallback: scrape Hearing Search UI for family/divorce court hearings."""
+        cases = await self._get_cases_via_hearing_search(
+            court_location="District Courts - Family",
+            lookback_days=30,
+            lookahead_days=60,
+        )
+        if not cases:
+            logger.warning("dallas_divorce_hearing_search_empty")
+            return
+
+        total = 0
+        for row in cases:
+            record = self._build_record_from_hearing_row(row)
+            if record and await self.validate_record(record):
+                yield record
+                total += 1
+                await self._rate_limit_sleep()
+
+        logger.info("dallas_divorce_hearing_complete", total_yielded=total)
+
+    def _build_record_from_hearing_row(self, row: dict) -> RawIndicatorRecord | None:
+        """Build RawIndicatorRecord from a Hearing Search table row."""
+        case_number = ""
+        for k in row:
+            if re.search(r"case.?no|case.?number|casenum", k, re.I):
+                case_number = str(row[k]).strip()
+                break
+
+        style_name = ""
+        for k in row:
+            if re.search(r"style|name|caption|parties", k, re.I):
+                style_name = str(row[k]).strip()
+                break
+
+        if not case_number:
+            return None
+
+        case_url = ""
+        for k in row:
+            if k.endswith("_href") and row[k]:
+                case_url = str(row[k])
+                break
+
+        hearing_date_str = ""
+        for k in row:
+            if re.search(r"hearing.?date|date|scheduled", k, re.I) and not k.endswith("_href"):
+                hearing_date_str = str(row[k]).strip()
+                break
+
+        filing_date: date | None = None
+        if hearing_date_str:
+            for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m-%d-%Y"):
+                try:
+                    filing_date = datetime.strptime(hearing_date_str[:10], fmt).date()
+                    break
+                except ValueError:
+                    continue
+
+        # Petitioner from "SMITH VS JONES" style
+        petitioner_name: str | None = None
+        if " VS " in style_name.upper():
+            petitioner_name = style_name.upper().split(" VS ")[0].strip().title()
+        elif style_name:
+            petitioner_name = style_name.title()
+
+        address_raw = case_url or f"Divorce {case_number}, Dallas County, TX"
+
+        return RawIndicatorRecord(
+            indicator_type="lien",
+            address_raw=address_raw,
+            county_fips=self.county_fips,
+            owner_name=petitioner_name,
+            filing_date=filing_date,
+            case_number=case_number,
+            source_url=f"{PORTAL_BASE}/",
+            raw_payload={
+                "case_number": case_number,
+                "style_name": style_name,
+                "case_url": case_url,
+                "source": "hearing_search",
+                "signal": "divorce_active",
+                **{k: v for k, v in row.items() if not k.startswith("_")},
+            },
+        )
 
     async def _try_search(self) -> list[tuple[dict, dict]]:
         """Try multiple nodeId + case type combinations until one returns results."""
