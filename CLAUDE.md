@@ -107,3 +107,86 @@ No test suite exists. When adding tests, use `pytest`. Key functions worth testi
 - The `google-cloud-storage` import is wrapped in try/except — GCS features silently degrade if the package is missing.
 - TRW file format can change without notice; column positions are hardcoded.
 - All amounts are integer cents (no decimal handling).
+
+---
+
+# Real Estate Lead Scraper — Project Context
+
+## Goal
+Build a modular Python scraper that pulls motivated seller leads from public
+county records and stores them in Supabase.
+
+## Target Counties (Phase 1)
+- Dallas County, TX
+- Polk County, FL
+- Hillsborough County, FL
+
+## Target List Types (Priority Order)
+1. Tax Delinquent
+2. Lis Pendens / Pre-Foreclosure
+3. Code Violations
+4. Probate Filings
+5. Evictions
+
+## Output Schema (Supabase table: leads)
+- id (uuid)
+- first_name
+- last_name
+- mailing_address
+- mailing_city
+- mailing_state
+- mailing_zip
+- property_address
+- property_city
+- property_state
+- property_zip
+- county
+- list_type (tax_delinquent, lis_pendens, etc.)
+- source_url
+- distress_signals (array — for stacking)
+- score (int — number of stacked signals)
+- date_pulled (timestamp)
+- raw_data (jsonb — store original record)
+
+## Tech Stack
+- Python 3.11+
+- requests + BeautifulSoup for HTML scraping
+- playwright for JS-heavy sites
+- supabase-py for database writes
+- python-dotenv for credentials
+- loguru for logging
+
+## Project Structure
+real-estate-scraper/
+├── CLAUDE.md
+├── .env
+├── main.py
+├── config.py
+├── scrapers/
+│   ├── __init__.py
+│   ├── base_scraper.py
+│   ├── dallas/
+│   │   ├── tax_delinquent.py
+│   │   ├── lis_pendens.py
+│   │   └── code_violations.py
+│   ├── polk/
+│   │   ├── tax_delinquent.py
+│   │   └── lis_pendens.py
+│   └── hillsborough/
+│       ├── tax_delinquent.py
+│       └── lis_pendens.py
+├── processors/
+│   ├── deduplicator.py
+│   └── scorer.py
+├── db/
+│   └── supabase_client.py
+└── logs/
+
+## Rules for Claude Code
+- Build one scraper module at a time
+- Always test with a small sample before bulk pulling
+- Never hardcode credentials — use .env
+- Every scraper inherits from base_scraper.py
+- Log all errors with loguru, never silently fail
+- After each scrape, run deduplicator before writing to Supabase
+- Score each lead based on how many distress signals stack
