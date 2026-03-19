@@ -30,18 +30,18 @@ if TYPE_CHECKING:
 # Base weights out of 100 — tuned empirically, stored here so they can be
 # adjusted without a DB migration.
 BASE_WEIGHTS: dict[str, float] = {
-    "foreclosure":      50,
-    "pre_foreclosure":  40,
-    "probate":          30,
+    "foreclosure":      65,
+    "pre_foreclosure":  45,
+    "probate":          35,
     "tax_delinquent":   25,
     "lien":             20,
     "eviction":         20,
-    "expired_listing":  20,
+    "expired_listing":  15,
     "code_violation":   15,
     "vacant":           15,
-    "price_reduction":  15,
-    "absentee_owner":   10,
-    "days_on_market":   10,
+    "price_reduction":  10,
+    "absentee_owner":    8,
+    "days_on_market":    8,
 }
 
 # Recency decay — multiplier applied based on how old the indicator is
@@ -73,7 +73,7 @@ DOM_BOOST_THRESHOLDS: list[tuple[int, float]] = [
 ]
 
 HOT_THRESHOLD  = 60.0
-WARM_THRESHOLD = 30.0
+WARM_THRESHOLD = 35.0
 
 
 # ---------------------------------------------------------------------------

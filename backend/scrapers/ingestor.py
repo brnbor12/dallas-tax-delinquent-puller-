@@ -117,7 +117,7 @@ def _get_or_create_property(
             select(Property).where(
                 Property.apn == record.apn,
                 Property.county_id == county.id,
-            )
+            ).limit(1)
         ).scalar_one_or_none()
         if prop:
             _update_property_location(prop, lat, lng)
@@ -131,7 +131,7 @@ def _get_or_create_property(
             select(Property).where(
                 Property.county_id == county.id,
                 Property.address_normalized == addr_norm,
-            )
+            ).limit(1)
         ).scalar_one_or_none()
         if prop:
             _update_property_location(prop, lat, lng)
@@ -174,6 +174,46 @@ def _get_or_create_property(
                 )
                 _update_property_location(prop, lat, lng)
                 return prop
+
+    # Owner name fallback — for scraper records with no valid address
+    # (e.g. probate/eviction cases where address is unknown)
+    # Search existing bulk properties by owner name before creating placeholder
+    if record.owner_name and county.id and not addr_norm[0:1].isdigit():
+        name_parts = record.owner_name.upper().split()
+        if len(name_parts) >= 2:
+            # Try last name match against bulk properties
+            last_name = name_parts[-1]  # probate names are "First Last"
+            rows = session.execute(
+                text("""
+                    SELECT p.id FROM properties p
+                    JOIN owners o ON o.property_id = p.id
+                    WHERE p.county_id = :county_id
+                    AND p.data_source != 'scraper'
+                    AND p.address_zip IS NOT NULL AND p.address_zip != ''
+                    AND o.name_raw ILIKE :last_name
+                    LIMIT 5
+                """),
+                {"county_id": county.id, "last_name": f"%{last_name}%"}
+            ).fetchall()
+            if len(rows) == 1:
+                # Unambiguous single match — use it
+                prop = session.get(Property, rows[0][0])
+                if prop:
+                    logger.info("ingestor_owner_name_match",
+                                owner=record.owner_name, prop_id=prop.id)
+                    return prop
+            elif len(rows) == 0:
+                # No match — skip entirely, return None signal to caller
+                logger.debug("ingestor_owner_name_no_match",
+                            owner=record.owner_name, case=record.case_number)
+                # Return a dummy that won't be used — caller checks address
+                pass
+
+    # Skip creating placeholder properties with no real address
+    if not addr_norm[0:1].isdigit() and not record.apn:
+        logger.debug("ingestor_skip_no_address",
+                    address=record.address_raw, case=record.case_number)
+        raise ValueError(f"No valid address for record: {record.address_raw}")
 
     # Create new property
     location_wkt = f"SRID=4326;POINT({lng} {lat})" if lat and lng else None

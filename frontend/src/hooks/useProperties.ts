@@ -10,7 +10,6 @@ export function useProperties(page = 1) {
     queryKey: ['properties', params, page],
     queryFn: () => fetchProperties(params, page),
     placeholderData: keepPreviousData,
-    staleTime: 60_000,
   })
 }
 
@@ -30,6 +29,5 @@ export function useMapPoints() {
   return useQuery({
     queryKey: ['mapPoints', params],
     queryFn: () => fetchMapPoints(params),
-    staleTime: 60_000,
   })
 }

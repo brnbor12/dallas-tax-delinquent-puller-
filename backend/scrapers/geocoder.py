@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import structlog
 import time
 
@@ -20,6 +21,52 @@ import httpx
 from app.core.config import settings
 
 logger = structlog.get_logger(__name__)
+
+# Approximate bounding boxes (lat_min, lat_max, lng_min, lng_max) per US state
+_STATE_BOUNDS: dict[str, tuple[float, float, float, float]] = {
+    "AL": (30.14, 35.01, -88.47, -84.89), "AK": (54.56, 71.39, -168.00, -129.99),
+    "AZ": (31.33, 37.00, -114.82, -109.04), "AR": (33.00, 36.50, -94.62, -89.64),
+    "CA": (32.53, 42.01, -124.41, -114.13), "CO": (36.99, 41.00, -109.06, -102.04),
+    "CT": (40.98, 42.05, -73.73, -71.79), "DC": (38.79, 38.99, -77.12, -76.91),
+    "DE": (38.45, 39.84, -75.79, -75.05), "FL": (24.54, 31.00, -87.63, -80.03),
+    "GA": (30.36, 35.00, -85.61, -80.84), "HI": (18.91, 22.24, -160.24, -154.81),
+    "ID": (41.99, 49.00, -117.24, -111.04), "IL": (36.97, 42.51, -91.51, -87.02),
+    "IN": (37.77, 41.77, -88.10, -84.78), "IA": (40.37, 43.50, -96.64, -90.14),
+    "KS": (36.99, 40.00, -102.05, -94.59), "KY": (36.50, 39.15, -89.57, -81.96),
+    "LA": (28.93, 33.02, -94.04, -88.82), "ME": (43.06, 47.46, -71.08, -66.95),
+    "MD": (37.91, 39.72, -79.49, -75.05), "MA": (41.24, 42.89, -73.50, -69.93),
+    "MI": (41.70, 48.18, -90.42, -82.41), "MN": (43.50, 49.38, -97.24, -89.49),
+    "MS": (30.17, 35.01, -91.65, -88.10), "MO": (35.99, 40.61, -95.77, -89.10),
+    "MT": (44.36, 49.00, -116.05, -104.04), "NE": (40.00, 43.00, -104.05, -95.31),
+    "NV": (35.00, 42.00, -120.00, -114.04), "NH": (42.70, 45.31, -72.56, -70.61),
+    "NJ": (38.93, 41.36, -75.56, -73.89), "NM": (31.33, 37.00, -109.05, -103.00),
+    "NY": (40.47, 45.02, -79.76, -71.79), "NC": (33.84, 36.59, -84.32, -75.46),
+    "ND": (45.93, 49.00, -104.05, -96.55), "OH": (38.40, 41.98, -84.82, -80.52),
+    "OK": (33.62, 37.00, -103.00, -94.43), "OR": (41.99, 46.24, -124.57, -116.46),
+    "PA": (39.72, 42.27, -80.52, -74.69), "RI": (41.15, 42.02, -71.91, -71.12),
+    "SC": (32.04, 35.22, -83.36, -78.56), "SD": (42.48, 45.94, -104.06, -96.44),
+    "TN": (34.98, 36.68, -90.31, -81.65), "TX": (25.83, 36.50, -106.65, -93.51),
+    "UT": (36.99, 42.00, -114.05, -109.04), "VT": (42.73, 45.02, -73.44, -71.46),
+    "VA": (36.54, 39.47, -83.68, -75.17), "WA": (45.54, 49.00, -124.68, -116.92),
+    "WV": (37.20, 40.64, -82.65, -77.72), "WI": (42.49, 46.96, -92.89, -86.25),
+    "WY": (40.99, 45.01, -111.05, -104.05),
+}
+
+_ZIP_RE = re.compile(r",?\s*\d{5}(-\d{4})?$")
+_STATE_RE = re.compile(r",\s*([A-Z]{2})\s*(?:\d{5}|,|$)")
+
+
+def _extract_state(address: str) -> str | None:
+    m = _STATE_RE.search(address.upper())
+    return m.group(1) if m else None
+
+
+def _in_state_bounds(lat: float, lng: float, state: str) -> bool:
+    bounds = _STATE_BOUNDS.get(state)
+    if not bounds:
+        return True
+    lat_min, lat_max, lng_min, lng_max = bounds
+    return lat_min <= lat <= lat_max and lng_min <= lng <= lng_max
 
 _redis_client = None
 
@@ -73,12 +120,31 @@ def geocode_address(address: str) -> tuple[float | None, float | None]:
 def _geocode_fresh(address: str) -> tuple[float | None, float | None]:
     if settings.geocoder == "google" and settings.google_maps_api_key:
         return _geocode_google(address)
+
+    expected_state = _extract_state(address)
+
     # Census Bureau geocoder: free, no API key, no rate limits, US only
     result = _geocode_census(address)
     if result[0] is not None:
-        return result
-    # Nominatim fallback
-    return _geocode_nominatim(address)
+        if not expected_state or _in_state_bounds(result[0], result[1], expected_state):
+            return result
+        # Result landed in wrong state — likely a bad ZIP. Retry without it.
+        logger.warning(
+            "geocode_wrong_state",
+            address=address,
+            expected=expected_state,
+            lat=result[0],
+            lng=result[1],
+        )
+        address_no_zip = _ZIP_RE.sub("", address).strip()
+        if address_no_zip != address:
+            result = _geocode_census(address_no_zip)
+            if result[0] is not None and _in_state_bounds(result[0], result[1], expected_state):
+                return result
+
+    # Nominatim removed — causes 429s when multiple workers run concurrently.
+    # Properties without Census match are stored with NULL geometry.
+    return None, None
 
 
 def _geocode_census(address: str) -> tuple[float | None, float | None]:

@@ -123,25 +123,44 @@ class DallasDivorceScraper(TylerOdysseyPlaywrightScraper):
         logger.info("dallas_divorce_complete", total_yielded=total)
 
     async def _fetch_via_hearing_search(self) -> AsyncIterator[RawIndicatorRecord]:
-        """Fallback: scrape Hearing Search UI for family/divorce court hearings."""
-        cases = await self._get_cases_via_hearing_search(
-            court_location="District Courts - Family",
-            lookback_days=30,
-            lookahead_days=60,
-        )
-        if not cases:
-            logger.warning("dallas_divorce_hearing_search_empty")
-            return
+        """
+        Letter sweep A-Z on Hearing Search (Dashboard/26).
+        CaptchaEnabled=False on this endpoint — works without auth.
+        """
+        import string
+        seen: set[str] = set()
 
-        total = 0
-        for row in cases:
-            record = self._build_record_from_hearing_row(row)
-            if record and await self.validate_record(record):
-                yield record
-                total += 1
-                await self._rate_limit_sleep()
+        for letter in string.ascii_lowercase:
+            cases = await self._get_cases_via_hearing_search(
+                court_location="District Courts - Family",
+                lookback_days=LOOKBACK_DAYS,
+                lookahead_days=60,
+                search_by_type="PartyName",
+                search_value=letter,
+                first_name="%",
+            )
+            if cases:
+                logger.info(
+                    "dallas_divorce_hearing_hit",
+                    letter=letter,
+                    count=len(cases),
+                )
+            for row in cases:
+                case_number = str(row.get("CaseNumber") or "").strip()
+                if not case_number:
+                    for k in row:
+                        if __import__("re").search(r"case.?no|case.?number|casenum", k, __import__("re").I):
+                            case_number = str(row[k]).strip()
+                            break
+                if not case_number or case_number in seen:
+                    continue
+                seen.add(case_number)
+                record = self._build_record_from_hearing_row(row)
+                if record and await self.validate_record(record):
+                    yield record
+                    await self._rate_limit_sleep()
 
-        logger.info("dallas_divorce_hearing_complete", total_yielded=total)
+        logger.info("dallas_divorce_hearing_complete", total_yielded=len(seen))
 
     def _build_record_from_hearing_row(self, row: dict) -> RawIndicatorRecord | None:
         """Build RawIndicatorRecord from a Hearing Search table row."""

@@ -7,44 +7,39 @@ Portal: GovOS/Kofile PublicSearch at https://dallas.tx.publicsearch.us
 Data:   Lis Pendens ("suit pending") instruments recorded with the county
         clerk.  A Lis Pendens puts the world on notice that the property is
         subject to a pending lawsuit — most commonly a lender's foreclosure
-        action or a title dispute.  Recording date + grantor (property owner)
-        name are the key fields; the recorded document does NOT include a
-        street address (address enrichment must come from assessor lookups).
+        action or a title dispute.
 
 Signal: indicator_type = "lien"
         Active Lis Pendens = ongoing legal action that encumbers title.
-        Lenders file these before foreclosure auctions; they signal severe
-        financial distress.  Especially actionable when combined with tax
-        delinquency or code violations.
 
 Strategy:
-        GovOS PublicSearch is a React SPA — the results page renders
-        client-side via XHR/fetch calls to an internal JSON API.  We use
-        Playwright to:
-          1. Navigate to the search URL with LP docType + date-range params.
-          2. Intercept every JSON API response matching the results endpoint.
-          3. Collect instrument records across paginated responses.
-          4. Click "next page" inside the browser to trigger subsequent pages.
+        The results URL with department=RP&docTypes=LP renders an HTML table
+        of LP instruments directly.  We:
+          1. Navigate to the results URL with LP filter + date-range.
+          2. Parse the HTML table rows (columns: Grantor, Grantee, Doc Type,
+             Recorded Date, Doc Number, Book/Volume/Page, Town, Legal Description).
+          3. Paginate by clicking numbered page buttons (50 rows/page).
+          4. Yield one RawIndicatorRecord per LP instrument.
 
-        If the API interception yields nothing (portal changed endpoints),
-        the scraper falls back to DOM parsing of the rendered results table.
-        Both approaches log enough detail to diagnose failures.
+URL format:
+        https://dallas.tx.publicsearch.us/results
+            ?department=RP
+            &docTypes=LP
+            &recordedDateRange=YYYYMMDD%2CYYYYMMDD
+            &searchType=advancedSearch
 
-Doctype: "LP" is the most common code.  The scraper also tries "LIS" if LP
-        returns 0 results (GovOS version differences across counties).
+Address: Lis Pendens filings carry a legal description (lot/block/subdivision)
+        and a "Town" field, but no street address.  The scraper stores a
+        placeholder ("Lis Pendens {doc_num}, {town}, Dallas County, TX") and
+        keeps grantor name as owner_name for downstream enrichment.
 
-Address: Lis Pendens filings do not include street addresses — only a legal
-        description (lot/block/subdivision).  The scraper stores a placeholder
-        address ("Lis Pendens {num}, Dallas County, TX") and the grantor name
-        in owner_name so the record can be enriched via assessor APN lookup.
-
-Rate:   5 req/min — conservative; Playwright navigations are slow anyway.
+Rate:   5 req/min — Playwright navigations are slow; be conservative.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
+import re
 import structlog
 from datetime import date, datetime, timedelta
 from typing import AsyncIterator
@@ -58,375 +53,231 @@ COUNTY_FIPS = "48113"
 PORTAL_BASE = "https://dallas.tx.publicsearch.us"
 SOURCE_URL = f"{PORTAL_BASE}/"
 
-# Search window: active liens (recent filings; old ones age off or get cancelled)
 LOOKBACK_DAYS = 90
 
-# GovOS document type codes for Lis Pendens — try in order
-_LP_DOC_TYPES = ["LP", "LIS", "LISP", "LIS PENDENS"]
-
-# Substrings that identify the JSON search-results API response URL
-_API_URL_HINTS = (
-    "/api/search",
-    "/api/instruments",
-    "/search/instruments",
-    "docType",
-    "instrument",
-)
-
-# GovOS pagination page size
-PAGE_SIZE = 25
+# Table column indices (0-based) — first 3 cols are empty icon columns
+_COL_GRANTOR = 3
+_COL_GRANTEE = 4
+_COL_DOC_TYPE = 5
+_COL_RECORDED_DATE = 6
+_COL_DOC_NUMBER = 7
+_COL_BOOK_VOL_PAGE = 8
+_COL_TOWN = 9
+_COL_LEGAL_DESC = 10
 
 
-def _coerce(d: dict, *keys: str, default: str = "") -> str:
-    for k in keys:
-        v = d.get(k)
-        if v is not None:
-            return str(v).strip()
-    return default
+def _build_search_url(start_date: str, end_date: str) -> str:
+    """Build the GovOS advanced search URL for LP doc type.
+
+    Dates must be YYYYMMDD format.  The comma separator is URL-encoded as %2C.
+    """
+    return (
+        f"{PORTAL_BASE}/results"
+        f"?department=RP"
+        f"&docTypes=LP"
+        f"&recordedDateRange={start_date}%2C{end_date}"
+        f"&searchType=advancedSearch"
+    )
 
 
-def _join_names(parties: list[dict]) -> str | None:
-    """Extract and join party names from a GovOS parties array."""
-    names = []
-    for p in parties or []:
-        name = _coerce(p, "name", "fullName", "Name").strip()
-        if name:
-            names.append(name.title())
-    return "; ".join(names) if names else None
+def _parse_recorded_date(raw: str) -> date | None:
+    for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m-%d-%Y"):
+        try:
+            return datetime.strptime(raw.strip(), fmt).date()
+        except ValueError:
+            continue
+    return None
 
 
 class DallasLisPendensScraper(PlaywrightBaseScraper):
     county_fips = COUNTY_FIPS
     source_name = "Dallas County Clerk Lis Pendens (GovOS PublicSearch)"
     indicator_types = ["lien"]
-    rate_limit_per_minute = 5  # Playwright navigations are slow; be conservative
+    rate_limit_per_minute = 5
 
     async def fetch_records(self, **kwargs) -> AsyncIterator[RawIndicatorRecord]:
-        start_date = (date.today() - timedelta(days=LOOKBACK_DAYS)).strftime("%Y-%m-%d")
-        end_date = date.today().strftime("%Y-%m-%d")
+        start_date = (date.today() - timedelta(days=LOOKBACK_DAYS)).strftime("%Y%m%d")
+        end_date = date.today().strftime("%Y%m%d")
+        search_url = _build_search_url(start_date, end_date)
 
         total = 0
+        async with self.browser_context() as ctx:
+            page = await ctx.new_page()
 
-        for doc_type in _LP_DOC_TYPES:
-            instruments = await self._fetch_by_doc_type(doc_type, start_date, end_date)
-            if instruments:
-                logger.info(
-                    "dallas_lp_doc_type_hit",
-                    doc_type=doc_type,
-                    count=len(instruments),
-                )
-                for inst in instruments:
-                    record = self._build_record(inst)
+            # Navigate to homepage first so the React SPA establishes session
+            # state, then go to the results URL.  Going directly to /results
+            # sometimes triggers a blank page on repeat visits.
+            try:
+                await page.goto(PORTAL_BASE + "/", wait_until="domcontentloaded", timeout=30_000)
+                await asyncio.sleep(2)
+            except Exception:
+                pass  # non-fatal; attempt results URL anyway
+
+            logger.info("dallas_lp_navigate", url=search_url[:100])
+            try:
+                await page.goto(search_url, wait_until="domcontentloaded", timeout=45_000)
+            except Exception as exc:
+                logger.warning("dallas_lp_navigation_error", error=str(exc)[:120])
+                return
+
+            # Wait for the React SPA to render the results table
+            try:
+                await page.wait_for_selector("table tbody tr", timeout=25_000)
+            except Exception:
+                logger.warning("dallas_lp_table_timeout", hint="No table rows after 25s")
+            await asyncio.sleep(2)
+
+            # Count total pages from pagination
+            page_count = await self._get_page_count(page)
+            logger.info("dallas_lp_pages_found", pages=page_count, url=search_url[:80])
+
+            for page_num in range(1, page_count + 1):
+                if page_num > 1:
+                    clicked = await self._go_to_page(page, page_num)
+                    if not clicked:
+                        logger.warning("dallas_lp_page_nav_failed", page=page_num)
+                        break
+                    await asyncio.sleep(2)
+
+                rows = await self._parse_table(page)
+                logger.info("dallas_lp_page_parsed", page=page_num, rows=len(rows))
+
+                for row in rows:
+                    record = self._build_record(row)
                     if record and await self.validate_record(record):
                         yield record
                         total += 1
-                break  # don't double-count; stop at first successful type
-            else:
-                logger.debug("dallas_lp_doc_type_no_results", doc_type=doc_type)
 
         if total == 0:
             logger.warning(
                 "dallas_lp_no_records",
                 hint=(
-                    "All LP doc type codes returned 0 results. "
-                    "Open https://dallas.tx.publicsearch.us in a browser, "
-                    "search for Lis Pendens, and check the Network tab for "
-                    "the actual API endpoint URL and doc type code."
+                    "0 LP records yielded. Check "
+                    f"https://dallas.tx.publicsearch.us/results"
+                    "?department=RP&docTypes=LP&recordedDateRange=YYYYMMDD%2CYYYYMMDD"
+                    "&searchType=advancedSearch"
                 ),
             )
         else:
             logger.info("dallas_lp_complete", total_yielded=total)
 
-    async def _fetch_by_doc_type(
-        self, doc_type: str, start_date: str, end_date: str
-    ) -> list[dict]:
-        """
-        Open the portal in a Playwright browser, navigate to the search
-        results page for the given doc type + date range, and collect all
-        instrument records across pages.
-
-        Strategy A: Intercept JSON API responses (preferred — clean data).
-        Strategy B: DOM parse the rendered results table (fallback).
-        """
-        search_url = (
-            f"{PORTAL_BASE}/results"
-            f"?search=&docTypes={doc_type}"
-            f"&dateRecordedMin={start_date}"
-            f"&dateRecordedMax={end_date}"
-        )
-
-        captured: list[dict] = []  # instrument records collected from API responses
-        api_hit = False
-
-        async with self.browser_context() as ctx:
-            page = await ctx.new_page()
-
-            # --- Strategy A: Intercept JSON API responses ---
-            async def handle_response(response):
-                nonlocal api_hit
-                url = response.url
-                # Heuristic: look for any response that might be the search API
-                if response.status != 200:
-                    return
-                content_type = response.headers.get("content-type", "")
-                if "json" not in content_type:
-                    return
-                if not any(hint in url for hint in _API_URL_HINTS):
-                    return
-                try:
-                    data = await response.json()
-                    instruments = self._extract_instruments(data, url)
-                    if instruments:
-                        api_hit = True
-                        captured.extend(instruments)
-                        logger.debug(
-                            "dallas_lp_api_intercepted",
-                            url=url[:120],
-                            count=len(instruments),
-                        )
-                except Exception as exc:
-                    logger.debug("dallas_lp_intercept_parse_error", url=url[:80], error=str(exc)[:100])
-
-            page.on("response", handle_response)
-
-            # Navigate to the search URL
-            try:
-                await page.goto(search_url, wait_until="networkidle", timeout=30_000)
-            except Exception as exc:
-                logger.warning("dallas_lp_navigation_error", url=search_url[:100], error=str(exc)[:120])
-                return []
-
-            # Wait a moment for any deferred XHR
-            await asyncio.sleep(3)
-
-            if api_hit:
-                # Paginate: click "next" until exhausted
-                captured.extend(
-                    await self._paginate_via_clicks(page, doc_type, start_date, end_date)
-                )
-                return captured
-
-            # --- Strategy B: DOM fallback ---
-            logger.info(
-                "dallas_lp_fallback_to_dom",
-                doc_type=doc_type,
-                hint="No API response intercepted; attempting DOM parse",
-            )
-            return await self._scrape_dom(page)
-
-    async def _paginate_via_clicks(
-        self, page, doc_type: str, start_date: str, end_date: str
-    ) -> list[dict]:
-        """
-        Click the 'Next' pagination button repeatedly, collecting instrument
-        records from each subsequent API response.
-        """
-        additional: list[dict] = []
-        page_num = 2
-
-        while True:
-            # Try common "Next page" selectors used in GovOS portals
-            next_btn = None
-            for selector in (
-                "button[aria-label='Next page']",
-                "button[aria-label='next']",
-                "li.pagination-next:not(.disabled) a",
-                "[data-testid='next-page']",
-                "button:has-text('Next')",
-                "a:has-text('Next')",
-            ):
-                try:
-                    btn = page.locator(selector)
-                    if await btn.count() > 0 and await btn.is_enabled():
-                        next_btn = btn
-                        break
-                except Exception:
-                    continue
-
-            if next_btn is None:
-                logger.debug("dallas_lp_pagination_done", pages=page_num - 1)
-                break
-
-            page_captured: list[dict] = []
-
-            async def handle_page_response(response):
-                url = response.url
-                if response.status != 200:
-                    return
-                content_type = response.headers.get("content-type", "")
-                if "json" not in content_type:
-                    return
-                if not any(hint in url for hint in _API_URL_HINTS):
-                    return
-                try:
-                    data = await response.json()
-                    instruments = self._extract_instruments(data, url)
-                    if instruments:
-                        page_captured.extend(instruments)
-                except Exception:
-                    pass
-
-            page.on("response", handle_page_response)
-
-            try:
-                await next_btn.click()
-                await page.wait_for_load_state("networkidle", timeout=15_000)
-                await asyncio.sleep(2)
-            except Exception as exc:
-                logger.debug("dallas_lp_next_click_error", page=page_num, error=str(exc)[:80])
-                break
-            finally:
-                page.remove_listener("response", handle_page_response)
-
-            if not page_captured:
-                logger.debug("dallas_lp_no_results_on_page", page=page_num)
-                break
-
-            additional.extend(page_captured)
-            logger.debug("dallas_lp_page_fetched", page=page_num, count=len(page_captured))
-            page_num += 1
-
-            # Safety: cap at 200 pages (5,000 instruments) to prevent runaway
-            if page_num > 200:
-                logger.warning("dallas_lp_pagination_cap_reached", pages=page_num)
-                break
-
-        return additional
-
-    async def _scrape_dom(self, page) -> list[dict]:
-        """
-        Fallback: attempt to parse a results table rendered in the DOM.
-        GovOS portals render a table with columns like:
-          Instrument # | Doc Type | Grantor | Grantee | Recorded Date
-        Returns synthetic instrument dicts to be processed by _build_record.
-        """
-        instruments = []
+    async def _get_page_count(self, page) -> int:
+        """Return the number of result pages from the pagination buttons."""
         try:
-            # Wait for any table or results list to appear
-            await page.wait_for_selector(
-                "table tr, [class*='result'], [class*='instrument']",
-                timeout=10_000,
+            # Pagination renders as ◀ 1 2 3 ▶ buttons
+            page_nums = await page.evaluate("""() => {
+                const btns = Array.from(document.querySelectorAll(
+                    '[class*="pagination"] button, [aria-label*="page"], [class*="page-btn"]'
+                ));
+                const nums = btns
+                    .map(b => parseInt(b.textContent.trim(), 10))
+                    .filter(n => !isNaN(n));
+                return nums.length ? Math.max(...nums) : 0;
+            }""")
+            if page_nums and page_nums > 0:
+                return int(page_nums)
+
+            # Fallback: check if table has any rows at all
+            row_count = await page.evaluate(
+                "() => document.querySelectorAll('table tbody tr').length"
             )
+            return 1 if row_count > 0 else 0
+        except Exception as exc:
+            logger.debug("dallas_lp_page_count_error", error=str(exc)[:80])
+            return 1
+
+    async def _go_to_page(self, page, page_num: int) -> bool:
+        """Click the numbered page button to navigate to the given page."""
+        try:
+            # Try various selectors for page number buttons
+            for selector in [
+                f"button:has-text('{page_num}')",
+                f"[aria-label='Page {page_num}']",
+                f"[aria-label='page {page_num}']",
+            ]:
+                btn = page.locator(selector).first
+                if await btn.count() > 0:
+                    await btn.click()
+                    await page.wait_for_load_state("networkidle", timeout=15_000)
+                    await asyncio.sleep(1.5)
+                    return True
+        except Exception as exc:
+            logger.debug("dallas_lp_page_click_error", page=page_num, error=str(exc)[:80])
+        return False
+
+    async def _parse_table(self, page) -> list[dict]:
+        """Extract all rows from the current results table."""
+        try:
+            await page.wait_for_selector("table tbody tr", timeout=10_000)
         except Exception:
-            logger.warning("dallas_lp_dom_no_results_element")
+            logger.warning("dallas_lp_no_table_rows")
             return []
 
-        rows = await page.query_selector_all("table tbody tr")
-        if not rows:
-            # Try card-style layout
-            rows = await page.query_selector_all("[class*='result-row'], [class*='instrument-row']")
+        rows = await page.evaluate("""() => {
+            const rows = document.querySelectorAll('table tbody tr');
+            return Array.from(rows).map(row => {
+                const cells = row.querySelectorAll('td');
+                const texts = Array.from(cells).map(c => c.textContent.trim().replace(/\\s+/g, ' '));
+                // Also try to grab the doc detail href
+                const links = row.querySelectorAll('a[href]');
+                const href = links.length > 0 ? links[0].href : '';
+                return {cells: texts, href: href};
+            });
+        }""")
 
-        for row in rows:
-            cells = await row.query_selector_all("td")
-            texts = [await c.inner_text() for c in cells]
-            if len(texts) < 3:
+        parsed = []
+        for row_data in rows:
+            cells = row_data.get("cells", [])
+            if len(cells) < 8:
                 continue
+            parsed.append({
+                "grantor": cells[_COL_GRANTOR] if len(cells) > _COL_GRANTOR else "",
+                "grantee": cells[_COL_GRANTEE] if len(cells) > _COL_GRANTEE else "",
+                "doc_type": cells[_COL_DOC_TYPE] if len(cells) > _COL_DOC_TYPE else "",
+                "recorded_date": cells[_COL_RECORDED_DATE] if len(cells) > _COL_RECORDED_DATE else "",
+                "doc_number": cells[_COL_DOC_NUMBER] if len(cells) > _COL_DOC_NUMBER else "",
+                "book_vol_page": cells[_COL_BOOK_VOL_PAGE] if len(cells) > _COL_BOOK_VOL_PAGE else "",
+                "town": cells[_COL_TOWN] if len(cells) > _COL_TOWN else "",
+                "legal_description": cells[_COL_LEGAL_DESC] if len(cells) > _COL_LEGAL_DESC else "",
+                "href": row_data.get("href", ""),
+            })
+        return parsed
 
-            # GovOS standard column order:
-            # [instrument_number, doc_type, grantor, grantee, recorded_date, book, page]
-            instrument: dict = {}
-            if len(texts) >= 1:
-                instrument["instrumentNumber"] = texts[0].strip()
-            if len(texts) >= 3:
-                instrument["grantors"] = [{"name": texts[2].strip()}]
-            if len(texts) >= 4:
-                instrument["grantees"] = [{"name": texts[3].strip()}]
-            if len(texts) >= 5:
-                instrument["recordedDate"] = texts[4].strip()
-
-            if instrument.get("instrumentNumber"):
-                instruments.append(instrument)
-
-        logger.info("dallas_lp_dom_scraped", count=len(instruments))
-        return instruments
-
-    @staticmethod
-    def _extract_instruments(data, url: str) -> list[dict]:
-        """
-        Pull an instrument list out of a GovOS JSON response.
-        GovOS uses several wrapper shapes across portal versions.
-        """
-        if isinstance(data, list):
-            # Bare array of instrument objects
-            return data
-
-        if isinstance(data, dict):
-            # Try known wrapper keys (GovOS v3/v4/v5 variations)
-            for key in (
-                "instruments",
-                "results",
-                "data",
-                "Records",
-                "records",
-                "items",
-                "Instruments",
-            ):
-                val = data.get(key)
-                if isinstance(val, list) and val:
-                    return val
-
-            # Some versions nest under a search result object
-            inner = data.get("searchResults") or data.get("SearchResults") or {}
-            if isinstance(inner, dict):
-                for key in ("instruments", "results", "data", "items"):
-                    val = inner.get(key)
-                    if isinstance(val, list) and val:
-                        return val
-
-        return []
-
-    def _build_record(self, inst: dict) -> RawIndicatorRecord | None:
-        instrument_number = _coerce(
-            inst, "instrumentNumber", "InstrumentNumber", "instrument_number", "id"
-        )
-        if not instrument_number:
+    def _build_record(self, row: dict) -> RawIndicatorRecord | None:
+        doc_number = (row.get("doc_number") or "").strip()
+        if not doc_number or doc_number in ("--", "N/A", ""):
             return None
 
-        # Grantor = property owner / borrower
-        grantor_name = _join_names(
-            inst.get("grantors") or inst.get("Grantors") or []
-        )
-        # Grantee = lender / plaintiff filing the LP
-        grantee_name = _join_names(
-            inst.get("grantees") or inst.get("Grantees") or []
-        )
+        grantor = (row.get("grantor") or "").strip().title()
+        grantee = (row.get("grantee") or "").strip().title()
+        town = (row.get("town") or "").strip().title()
+        legal_desc = (row.get("legal_description") or "").strip()
+        recorded_date_raw = (row.get("recorded_date") or "").strip()
 
-        raw_date = _coerce(
-            inst,
-            "recordedDate", "RecordedDate", "recorded_date",
-            "dateRecorded", "DateRecorded", "filingDate",
-        )
-        filing_date: date | None = None
-        if raw_date:
-            try:
-                filing_date = datetime.fromisoformat(raw_date[:10]).date()
-            except ValueError:
-                pass
+        filing_date = _parse_recorded_date(recorded_date_raw)
 
-        doc_type = _coerce(inst, "docType", "DocType", "doc_type", "documentType")
-        legal_desc = _coerce(
-            inst, "legalDescription", "LegalDescription", "legal_description"
-        )
+        # Build address: LP filings don't have street addresses, use placeholder
+        town_part = town if town and town not in ("N/A", "--", "No Town") else "Dallas County"
+        address_raw = f"Lis Pendens {doc_number}, {town_part}, TX"
 
-        # Lis Pendens do not carry street addresses — use placeholder
-        address_raw = f"Lis Pendens {instrument_number}, Dallas County, TX"
+        source = row.get("href") or SOURCE_URL
 
         return RawIndicatorRecord(
             indicator_type="lien",
             address_raw=address_raw,
             county_fips=self.county_fips,
-            owner_name=grantor_name,
+            owner_name=grantor or None,
             filing_date=filing_date,
-            case_number=instrument_number,
-            source_url=SOURCE_URL,
+            case_number=doc_number,
+            source_url=source,
             raw_payload={
-                "instrument_number": instrument_number,
-                "doc_type": doc_type,
-                "grantor": grantor_name,
-                "grantee": grantee_name,
-                "recorded_date": raw_date,
+                "doc_number": doc_number,
+                "doc_type": row.get("doc_type", "LIS PENDENS (NOTICE OF)"),
+                "grantor": grantor,
+                "grantee": grantee,
+                "recorded_date": recorded_date_raw,
+                "town": town,
                 "legal_description": legal_desc[:300] if legal_desc else "",
-                "book": _coerce(inst, "book", "Book"),
-                "page": _coerce(inst, "page", "Page"),
+                "book_vol_page": row.get("book_vol_page", ""),
             },
         )

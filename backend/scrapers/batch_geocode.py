@@ -55,7 +55,12 @@ def _cache_results(redis_client, results: dict[int, tuple[float, float]],
     """Cache geocode results in Redis so the regular geocoder can reuse them."""
     pipe = redis_client.pipeline()
     for prop_id, (lat, lng) in results.items():
-        address = id_to_address.get(prop_id, "")
+        addr_data = id_to_address.get(prop_id, "")
+        # addr_data may be a tuple (street, city, state, zip) or plain string
+        if isinstance(addr_data, tuple):
+            address = " ".join(p for p in addr_data if p)
+        else:
+            address = addr_data
         if address:
             key = _cache_key(address)
             pipe.setex(key, REDIS_TTL, json.dumps({"lat": lat, "lng": lng}))
@@ -63,7 +68,7 @@ def _cache_results(redis_client, results: dict[int, tuple[float, float]],
 
 
 def geocode_batch_census(
-    rows: list[tuple[int, str]]
+    rows: list[tuple[int, str, str, str, str]]
 ) -> dict[int, tuple[float, float]]:
     """
     Submit one batch to the Census geocoder.
@@ -75,10 +80,9 @@ def geocode_batch_census(
     # We pass the full address as the street field (one-line address works fine)
     csv_buf = io.StringIO()
     writer = csv.writer(csv_buf)
-    for prop_id, address in rows:
+    for prop_id, street, city, state, zipcode in rows:
         # Census batch CSV format: Unique ID, Street address, City, State, ZIP
-        # We can pass the full address in the street column; city/state/zip can be blank
-        writer.writerow([prop_id, address, "", "", ""])
+        writer.writerow([prop_id, street or "", city or "", state or "", zipcode or ""])
     csv_bytes = csv_buf.getvalue().encode("utf-8")
 
     results: dict[int, tuple[float, float]] = {}
@@ -130,12 +134,13 @@ def run_batch_geocode(
         county_filter = "AND c.fips_code = :fips"
 
     query = text(f"""
-        SELECT p.id, p.address_raw
+        SELECT p.id, p.address_line1, p.address_city, p.address_state, p.address_zip
         FROM properties p
         JOIN counties c ON c.id = p.county_id
         WHERE p.location IS NULL
-          AND p.address_raw IS NOT NULL
-          AND length(p.address_raw) > 5
+          AND p.address_line1 IS NOT NULL
+          AND length(p.address_line1) > 3
+          AND p.address_zip IS NOT NULL
           {county_filter}
         ORDER BY p.id
         {"LIMIT :lim" if limit else ""}
@@ -157,7 +162,7 @@ def run_batch_geocode(
         redis_client = None
         logger.warning("batch_geocode_redis_unavailable")
 
-    id_to_address = {row[0]: row[1] for row in all_rows}
+    id_to_address = {row[0]: (row[1], row[2], row[3], row[4]) for row in all_rows}
 
     for batch_start in range(0, len(all_rows), batch_size):
         batch = all_rows[batch_start : batch_start + batch_size]

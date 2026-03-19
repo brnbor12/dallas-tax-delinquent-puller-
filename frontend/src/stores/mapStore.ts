@@ -25,8 +25,8 @@ export const useMapStore = create<MapStore>((set) => ({
   selectedPropertyId: null,
   hoveredPropertyId: null,
   mapBounds: null,
-  mapCenter: [-118.2437, 34.0522],  // Default: Los Angeles
-  mapZoom: 10,
+  mapCenter: [-96.7970, 32.7767],  // Default: Dallas TX
+  mapZoom: 9,
   showHeatmap: false,
 
   setSelectedProperty: (id) => set({ selectedPropertyId: id }),

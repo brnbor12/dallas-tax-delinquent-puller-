@@ -462,6 +462,9 @@ class TylerOdysseyPlaywrightScraper(PlaywrightBaseScraper):
         lookback_days: int = 30,
         lookahead_days: int = 90,
         max_cases: int = 200,
+        search_value: str = "",
+        first_name: str = "",
+        search_by_type: str = "PartyName",
     ) -> list[dict]:
         """
         Fallback scraper: interacts with Hearing Search (Dashboard/26) via
@@ -562,69 +565,71 @@ class TylerOdysseyPlaywrightScraper(PlaywrightBaseScraper):
                 success=location_set,
             )
 
-            # Fill hearing date range
-            for field_patterns, value in [
-                (
-                    ["HearingDateFrom", "hearingDateFrom", "StartDate", "startDate", "DateFrom", "dateFrom"],
-                    date_from,
-                ),
-                (
-                    ["HearingDateTo", "hearingDateTo", "EndDate", "endDate", "DateTo", "dateTo"],
-                    date_to,
-                ),
-            ]:
-                filled = False
-                for pat in field_patterns:
-                    try:
-                        sel = f"input[name='{pat}'], input[id='{pat}']"
-                        count = await page.locator(sel).count()
-                        if count > 0:
-                            await page.fill(sel, value)
-                            filled = True
-                            break
-                    except Exception:
-                        continue
-                # Generic fallback: look for any date input
-                if not filled:
-                    try:
-                        date_inputs = await page.evaluate(
-                            "() => Array.from(document.querySelectorAll('input[type=\"text\"], input[type=\"date\"]'))"
-                            ".filter(i => /date/i.test(i.name + i.id + i.placeholder))"
-                            ".map(i => ({name: i.name, id: i.id}))"
-                        )
-                        logger.debug("odyssey_hearing_date_inputs_found", inputs=date_inputs)
-                    except Exception:
-                        pass
+            # Skip if no search criteria
+            if search_by_type == "PartyName" and not search_value and not first_name:
+                logger.debug("odyssey_hearing_skip_empty_party_search")
+                return []
 
-            # Click the search button
+            # CRITICAL: set SearchByType first — reveals hidden name fields via JS
+            try:
+                await page.select_option(
+                    "select[name='SearchCriteria.SearchByType']",
+                    value=search_by_type,
+                )
+                await asyncio.sleep(1.5)
+                logger.debug("odyssey_hearing_searchby_set", search_by_type=search_by_type)
+            except Exception as exc:
+                logger.warning("odyssey_hearing_searchby_failed", error=str(exc)[:100])
+
+            # Fill LastName — force visible via JS then fill
+            if search_value and search_by_type == "PartyName":
+                await page.evaluate(
+                    """([val]) => {
+                        const el = document.getElementById('txtHSLastName');
+                        if (el) {
+                            el.style.display = '';
+                            el.removeAttribute('hidden');
+                            el.value = val;
+                            el.dispatchEvent(new Event('input', {bubbles:true}));
+                            el.dispatchEvent(new Event('change', {bubbles:true}));
+                        }
+                    }""",
+                    [search_value],
+                )
+                logger.debug("odyssey_hearing_name_forced", value=search_value)
+
+            # First name is required by portal for Party Name searches — default to "%" wildcard
+            _fn = first_name if first_name else "%"
+            try:
+                await page.evaluate(
+                    """([val]) => {
+                        const el = document.getElementById('txtHSFirstName');
+                        if (el) { el.value = val; el.dispatchEvent(new Event('change', {bubbles:true})); }
+                    }""",
+                    [_fn],
+                )
+            except Exception:
+                pass
+
+            # Fill date range — confirmed field names
+            try:
+                await page.fill("input[name='SearchCriteria.DateFrom']", date_from)
+                await page.fill("input[name='SearchCriteria.DateTo']", date_to)
+                logger.debug("odyssey_hearing_dates_filled", date_from=date_from, date_to=date_to)
+            except Exception as exc:
+                logger.warning("odyssey_hearing_date_fill_failed", error=str(exc)[:100])
+
+            # Submit — confirmed: input[name='Search'] id='btnHSSubmit'
             submitted = False
-            for btn_text in ["Search", "Find", "Submit"]:
-                for sel in [
-                    f"button:has-text('{btn_text}')",
-                    f"input[value='{btn_text}']",
-                    f"a:has-text('{btn_text}')",
-                ]:
-                    try:
-                        loc = page.locator(sel).first
-                        count = await page.locator(sel).count()
-                        if count > 0:
-                            await loc.click()
-                            submitted = True
-                            logger.info("odyssey_hearing_submitted", selector=sel)
-                            break
-                    except Exception:
-                        continue
-                if submitted:
-                    break
-
-            if not submitted:
-                # Try any submit button
+            for sel in ["input[name='Search']", "input[id='btnHSSubmit']", "input[type='submit']", "button[type='submit']"]:
                 try:
-                    await page.locator("button[type='submit']").first.click()
-                    submitted = True
-                    logger.info("odyssey_hearing_submitted", selector="button[type=submit]")
+                    if await page.locator(sel).count() > 0:
+                        await page.locator(sel).first.click()
+                        submitted = True
+                        logger.info("odyssey_hearing_submitted", selector=sel)
+                        break
                 except Exception:
-                    pass
+                    continue
 
             if not submitted:
                 logger.warning("odyssey_hearing_no_submit_found")

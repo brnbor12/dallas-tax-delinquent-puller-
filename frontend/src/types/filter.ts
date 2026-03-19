@@ -36,7 +36,7 @@ export const DEFAULT_FILTERS: FilterState = {
   state: '',
   zip_codes: [],
   indicator_types: [],
-  score_min: 0,
+  score_min: 35,
   score_tier: '',
   property_type: '',
   year_built_min: '',

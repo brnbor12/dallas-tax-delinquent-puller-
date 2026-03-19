@@ -41,7 +41,6 @@ from scrapers.counties.texas.tyler_odyssey_base import TylerOdysseyPlaywrightScr
 logger = structlog.get_logger(__name__)
 
 COUNTY_FIPS = "48113"
-JP_PORTAL_BASE = "https://dcdjp.dallascounty.org"
 CC_PORTAL_BASE = "https://courtsportal.dallascounty.org/DALLASPROD"
 LOOKBACK_DAYS = 90  # evictions resolve quickly
 
@@ -80,7 +79,7 @@ def _extract_address(parties: list[dict], role_set: set[str]) -> str | None:
 
 
 class DallasEvictionScraper(TylerOdysseyPlaywrightScraper):
-    portal_base = JP_PORTAL_BASE  # set per-attempt in fetch_records
+    portal_base = CC_PORTAL_BASE
     county_fips = COUNTY_FIPS
     source_name = "Dallas County JP Court Evictions FED (Tyler Odyssey Playwright)"
     indicator_types = ["eviction"]
@@ -108,19 +107,79 @@ class DallasEvictionScraper(TylerOdysseyPlaywrightScraper):
         logger.info("dallas_eviction_complete", total_yielded=total)
 
     async def _fetch_via_hearing_search(self) -> AsyncIterator[RawIndicatorRecord]:
-        """Fallback: scrape Hearing Search UI for JP court FED hearings."""
-        self.portal_base = CC_PORTAL_BASE
-        cases = await self._get_cases_via_hearing_search(
+        """Fallback: scrape Hearing Search UI for JP court FED hearings.
+
+        Evictions are filed by landlords — many of whom are business entities
+        (LLCs, property management companies). BusinessName search works without
+        requiring FirstName, so we sweep A–Z to cover business plaintiffs.
+
+        PartyName is also attempted with empty FirstName to catch individual
+        landlords (though this usually fails server-side validation).
+        """
+        import string
+        seen_case_numbers: set[str] = set()
+        cases: list[dict] = []
+
+        # BusinessName sweep A–Z — catches LLC/corporate landlords
+        biz_hit = False
+        for letter in string.ascii_lowercase:
+            letter_cases = await self._get_cases_via_hearing_search(
+                court_location="Justice of the Peace Courts",
+                lookback_days=LOOKBACK_DAYS,
+                search_by_type="BusinessName",
+                search_value=letter,
+            )
+            if letter_cases:
+                logger.info("dallas_eviction_hearing_biz_hit",
+                            letter=letter, count=len(letter_cases))
+                cases.extend(letter_cases)
+                biz_hit = True
+
+        if not biz_hit:
+            logger.info("dallas_eviction_hearing_biz_sweep_empty",
+                        hint="No BusinessName results for JP courts")
+
+        # PartyName probe — catches individual landlords if server accepts empty FirstName
+        probe = await self._get_cases_via_hearing_search(
             court_location="Justice of the Peace Courts",
-            lookback_days=30,
-            lookahead_days=60,
+            lookback_days=LOOKBACK_DAYS,
+            search_by_type="PartyName",
+            search_value="smith",
+            first_name="",
         )
+        if probe:
+            cases.extend(probe)
+            for letter in string.ascii_lowercase:
+                if letter == "s":
+                    continue
+                letter_cases = await self._get_cases_via_hearing_search(
+                    court_location="Justice of the Peace Courts",
+                    lookback_days=LOOKBACK_DAYS,
+                    search_by_type="PartyName",
+                    search_value=letter,
+                    first_name="",
+                )
+                if letter_cases:
+                    cases.extend(letter_cases)
+
         if not cases:
             logger.warning("dallas_eviction_hearing_search_empty")
             return
 
         total = 0
         for row in cases:
+            case_number = str(row.get("CaseNumber") or "").strip()
+            if not case_number:
+                import re as _re
+                for k in row:
+                    if _re.search(r"case.?no|case.?number|casenum", k, _re.I):
+                        case_number = str(row[k]).strip()
+                        break
+            if case_number and case_number in seen_case_numbers:
+                continue
+            if case_number:
+                seen_case_numbers.add(case_number)
+
             record = self._build_record_from_hearing_row(row)
             if record and await self.validate_record(record):
                 yield record
@@ -130,47 +189,59 @@ class DallasEvictionScraper(TylerOdysseyPlaywrightScraper):
         logger.info("dallas_eviction_hearing_complete", total_yielded=total)
 
     def _build_record_from_hearing_row(self, row: dict) -> RawIndicatorRecord | None:
-        """Build RawIndicatorRecord from a Hearing Search table row."""
-        case_number = ""
-        for k in row:
-            if re.search(r"case.?no|case.?number|casenum", k, re.I):
-                case_number = str(row[k]).strip()
-                break
-
-        style_name = ""
-        for k in row:
-            if re.search(r"style|name|caption|parties", k, re.I):
-                style_name = str(row[k]).strip()
-                break
+        """Build RawIndicatorRecord from a Hearing Search JSON row (Read endpoint)."""
+        # JSON format from HearingResults/Read: CaseNumber, Style, HearingDate, CaseLoadUrl
+        case_number = str(row.get("CaseNumber") or "").strip()
+        if not case_number:
+            for k in row:
+                if re.search(r"case.?no|case.?number|casenum", k, re.I):
+                    case_number = str(row[k]).strip()
+                    break
 
         if not case_number:
             return None
 
-        case_url = ""
-        for k in row:
-            if k.endswith("_href") and row[k]:
-                case_url = str(row[k])
-                break
+        style_name = str(row.get("Style") or row.get("SortStyleOrDefendant") or "").strip()
+        if not style_name:
+            for k in row:
+                if re.search(r"style|defendant|caption|parties", k, re.I):
+                    val = row[k]
+                    if isinstance(val, str):
+                        style_name = val.strip()
+                        break
 
-        hearing_date_str = ""
-        for k in row:
-            if re.search(r"hearing.?date|date|scheduled", k, re.I) and not k.endswith("_href"):
-                hearing_date_str = str(row[k]).strip()
-                break
+        case_url = str(row.get("CaseLoadUrl") or "").strip()
+        if not case_url:
+            enc = row.get("EncryptedCaseId") or ""
+            case_id = row.get("CaseId") or ""
+            if enc:
+                case_url = f"{CC_PORTAL_BASE}/Case/CaseDetail?eid={enc}"
+            elif case_id:
+                case_url = f"{CC_PORTAL_BASE}/Case/CaseDetail?caseId={case_id}"
+
+        hearing_date_str = str(row.get("HearingDate") or "").strip()
 
         filing_date: date | None = None
         if hearing_date_str:
-            for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m-%d-%Y"):
-                try:
-                    filing_date = datetime.strptime(hearing_date_str[:10], fmt).date()
-                    break
-                except ValueError:
-                    continue
+            m = re.search(r"/Date\((\d+)\)/", hearing_date_str)
+            if m:
+                import datetime as _dt
+                filing_date = _dt.datetime.fromtimestamp(
+                    int(m.group(1)) / 1000, tz=_dt.timezone.utc
+                ).date()
+            else:
+                for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m-%d-%Y"):
+                    try:
+                        filing_date = datetime.strptime(hearing_date_str[:10], fmt).date()
+                        break
+                    except ValueError:
+                        continue
 
-        # In FED cases, defendant (tenant) = rental property address — use style as proxy
+        # Plaintiff = landlord. Style format: "LANDLORD VS TENANT" or "TENANT, LANDLORD"
         plaintiff = ""
-        if " VS " in style_name.upper():
-            plaintiff = style_name.upper().split(" VS ")[0].strip().title()
+        upper = style_name.upper()
+        if " VS " in upper:
+            plaintiff = style_name[:upper.index(" VS ")].strip().title()
 
         address_raw = case_url or f"Eviction {case_number}, Dallas County, TX"
 
@@ -192,37 +263,26 @@ class DallasEvictionScraper(TylerOdysseyPlaywrightScraper):
         )
 
     async def _try_portals(self) -> list[tuple[dict, dict]]:
-        """
-        Try JP portal first, then county clerk portal fallback.
-        Tries multiple node IDs and FED case type codes on each portal.
-        Dallas ePortal uses full location strings like "Justice of the Peace Courts".
-        """
-        jp_node_ids = ["Justice of the Peace Courts", "JP", "JPC", ""]
-        cc_node_ids = ["Justice of the Peace Courts", "JP", "JPC", ""]
+        """Try multiple node IDs and FED case type codes on the county clerk portal."""
+        node_ids = ["Justice of the Peace Courts", "JP", "JPC", ""]
 
-        for portal_base, node_ids in [
-            (JP_PORTAL_BASE, jp_node_ids),
-            (CC_PORTAL_BASE, cc_node_ids),
-        ]:
-            self.portal_base = portal_base
-            for node_id in node_ids:
-                for case_type in _FED_CASE_TYPES:
-                    pairs = await self._get_cases_with_details(
-                        category="CV",
+        for node_id in node_ids:
+            for case_type in _FED_CASE_TYPES:
+                pairs = await self._get_cases_with_details(
+                    category="CV",
+                    node_id=node_id,
+                    status_type="A",
+                    lookback_days=LOOKBACK_DAYS,
+                    case_type_id=case_type,
+                )
+                if pairs:
+                    logger.info(
+                        "dallas_eviction_portal_hit",
                         node_id=node_id,
-                        status_type="A",
-                        lookback_days=LOOKBACK_DAYS,
-                        case_type_id=case_type,
+                        case_type=case_type,
+                        count=len(pairs),
                     )
-                    if pairs:
-                        logger.info(
-                            "dallas_eviction_portal_hit",
-                            portal=portal_base,
-                            node_id=node_id,
-                            case_type=case_type,
-                            count=len(pairs),
-                        )
-                        return pairs
+                    return pairs
 
         return []
 

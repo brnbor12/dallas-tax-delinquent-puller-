@@ -23,6 +23,13 @@ class Settings(BaseSettings):
     # ATTOM Data
     attom_api_key: str = ""
 
+    # Supabase (GCP pipeline output)
+    supabase_url: str = ""
+    supabase_key: str = ""
+
+    # Dallas Open Data (Socrata)
+    dallas_open_data_token: str = ""
+
     # Proxy (Phase 3)
     proxy_host: str = ""
     proxy_port: str = ""

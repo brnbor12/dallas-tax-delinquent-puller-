@@ -7,8 +7,10 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from geoalchemy2.functions import ST_X, ST_Y
+from geoalchemy2.shape import to_shape
 
 from app.core.database import get_db
+from app.models.county import County
 from app.models.property import Property
 from app.models.indicator import PropertyIndicator
 from app.models.score import PropertyScore
@@ -25,6 +27,30 @@ from app.schemas.property import (
 )
 
 router = APIRouter(prefix="/properties", tags=["properties"])
+counties_router = APIRouter(prefix="/counties", tags=["counties"])
+
+
+@counties_router.get("")
+async def list_counties(db: AsyncSession = Depends(get_db)):
+    """Return counties that have at least one property, with counts."""
+    stmt = (
+        select(
+            County.fips_code,
+            County.name,
+            County.state_abbr,
+            func.count(Property.id).label("property_count"),
+        )
+        .join(Property, Property.county_id == County.id)
+        .group_by(County.fips_code, County.name, County.state_abbr)
+        .having(func.count(Property.id) > 0)
+        .order_by(func.count(Property.id).desc())
+    )
+    result = await db.execute(stmt)
+    rows = result.all()
+    return [
+        {"fips": r.fips_code, "name": r.name, "state_abbr": r.state_abbr, "count": r.property_count}
+        for r in rows
+    ]
 
 
 @router.get("", response_model=PropertyListResponse)
@@ -89,7 +115,7 @@ async def map_points(
 ):
     """
     Lightweight endpoint for map marker rendering.
-    Returns only id, lat, lng, and score_tier for up to 5000 properties.
+    Returns only id, lat, lng, and score_tier for up to 25000 properties.
     Used by MapLibre GL to render markers efficiently.
     """
     filters = params.to_filter_dict()
@@ -99,12 +125,16 @@ async def map_points(
             Property.id,
             ST_X(Property.location).label("lng"),
             ST_Y(Property.location).label("lat"),
+            Property.address_line1,
+            Property.address_city,
+            Property.address_state,
+            Property.address_zip,
             PropertyScore.score_tier,
             PropertyScore.total_score,
         )
         .outerjoin(Property.score)
         .where(Property.location.isnot(None))
-        .limit(5000)
+        .limit(25000)
     )
 
     conditions = _build_conditions(filters, stmt)
@@ -114,6 +144,11 @@ async def map_points(
 
     result = await db.execute(stmt)
     rows = result.all()
+
+    def _addr(row) -> str:
+        city_state = ", ".join(filter(None, [row.address_city, row.address_state, row.address_zip]))
+        parts = [p for p in [row.address_line1, city_state] if p]
+        return " — ".join(parts)
 
     return {
         "type": "FeatureCollection",
@@ -125,6 +160,7 @@ async def map_points(
                     "id": row.id,
                     "tier": row.score_tier or "cold",
                     "score": float(row.total_score or 0),
+                    "address": _addr(row),
                 },
             }
             for row in rows
@@ -146,8 +182,6 @@ def _build_list_query(filters: dict, limit: int, offset: int):
         .options(
             selectinload(Property.score),
             selectinload(Property.indicators),
-            selectinload(Property.owners),
-            selectinload(Property.listings),
             selectinload(Property.county),
         )
     )
@@ -207,16 +241,30 @@ def _build_conditions(filters: dict, stmt) -> list:
             conditions.append(Property.id.in_(subq))
 
     if score_min := filters.get("score_min"):
-        conditions.append(PropertyScore.total_score >= score_min)
+        subq = select(PropertyScore.property_id).where(PropertyScore.total_score >= score_min).scalar_subquery()
+        conditions.append(Property.id.in_(subq))
 
     if score_tier := filters.get("score_tier"):
-        conditions.append(PropertyScore.score_tier == score_tier)
+        subq = select(PropertyScore.property_id).where(PropertyScore.score_tier == score_tier).scalar_subquery()
+        conditions.append(Property.id.in_(subq))
+
 
     return conditions
 
 
+def _extract_coords(location) -> tuple[float | None, float | None]:
+    if location is None:
+        return None, None
+    try:
+        pt = to_shape(location)
+        return pt.y, pt.x  # lat, lng
+    except Exception:
+        return None, None
+
+
 def _to_list_item(prop: Property) -> PropertyListItem:
     active_types = [i.indicator_type for i in prop.indicators if i.status == "active"]
+    lat, lng = _extract_coords(prop.location)
     return PropertyListItem(
         id=prop.id,
         address_raw=prop.address_raw,
@@ -228,10 +276,13 @@ def _to_list_item(prop: Property) -> PropertyListItem:
         assessed_value=prop.assessed_value,
         score=ScoreSchema.model_validate(prop.score) if prop.score else None,
         active_indicator_types=active_types,
+        lat=lat,
+        lng=lng,
     )
 
 
 def _to_detail(prop: Property) -> PropertyDetail:
+    lat, lng = _extract_coords(prop.location)
     return PropertyDetail(
         id=prop.id,
         apn=prop.apn,
@@ -259,4 +310,6 @@ def _to_detail(prop: Property) -> PropertyDetail:
         indicators=[IndicatorSchema.model_validate(i) for i in prop.indicators],
         score=ScoreSchema.model_validate(prop.score) if prop.score else None,
         listings=[ListingSchema.model_validate(l) for l in prop.listings],
+        lat=lat,
+        lng=lng,
     )

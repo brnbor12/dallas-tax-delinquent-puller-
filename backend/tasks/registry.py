@@ -15,17 +15,9 @@ from scrapers.counties.florida.hillsborough_foreclosure import HillsboroughForec
 from scrapers.counties.florida.hillsborough_eviction import HillsboroughEvictionScraper
 from scrapers.counties.florida.hillsborough_probate import HillsboroughProbateScraper
 from scrapers.counties.florida.hillsborough_lis_pendens import HillsboroughLisPendensScraper
-from scrapers.counties.florida.hillsborough_code_enforcement import HillsboroughCodeEnforcementScraper
 from scrapers.counties.florida.polk_tax_deed import PolkTaxDeedScraper
 from scrapers.counties.florida.polk_absentee_owner import PolkAbsenteeOwnerScraper
-from scrapers.counties.florida.polk_tax_delinquent import PolkTaxDelinquentScraper
-from scrapers.counties.florida.polk_probate import PolkProbateScraper
-from scrapers.counties.florida.polk_eviction import PolkEvictionScraper
-from scrapers.counties.florida.polk_foreclosure import PolkForeclosureScraper
-from scrapers.counties.florida.polk_lis_pendens import PolkLisPendensScraper
 from scrapers.counties.platforms.socrata_api import SocrataAPIScraper
-from scrapers.platforms.rentcast import DallasRentcastScraper, HillsboroughRentcastScraper, PolkRentcastScraper
-from scrapers.counties.texas.dcad_bulk import DCADBulkScraper
 from scrapers.counties.texas.dallas_foreclosure import DallasCountyForeclosureScraper
 from scrapers.counties.texas.dallas_tax import DallasCountyTaxRollScraper
 from scrapers.counties.texas.dallas_code_enforcement import DallasCodeEnforcementScraper
@@ -38,12 +30,9 @@ from scrapers.counties.texas.dallas_supabase_leads import (
     DallasForeclosureNoticeSupabaseScraper,
 )
 from scrapers.counties.texas.harris_absentee_owner import HarrisAbsenteeOwnerScraper
-from scrapers.counties.texas.tarrant_absentee_owner import TarrantAbsenteeOwnerScraper
-from scrapers.counties.texas.dallas_obituary_match import DallasObituaryMatchScraper
 
 SCRAPER_REGISTRY: dict[str, type[BaseCountyScraper]] = {
     # Texas — Dallas County
-    "tx_dcad_bulk":                 DCADBulkScraper,
     "tx_dallas_foreclosure":        DallasCountyForeclosureScraper,
     "tx_dallas_tax_delinquent":     DallasCountyTaxRollScraper,
     "tx_dallas_code_enforcement":   DallasCodeEnforcementScraper,
@@ -54,33 +43,19 @@ SCRAPER_REGISTRY: dict[str, type[BaseCountyScraper]] = {
     # Texas — Dallas County (Supabase/GCP pipeline)
     "tx_dallas_supabase_leads":         DallasGovLeadsScraper,
     "tx_dallas_supabase_foreclosure":   DallasForeclosureNoticeSupabaseScraper,
-    # Texas — Dallas County (obituary → owner match)
-    "tx_dallas_obituary_match":         DallasObituaryMatchScraper,
     # Texas — Harris County (Houston metro)
     "tx_harris_absentee_owner":         HarrisAbsenteeOwnerScraper,
-    # Texas — Tarrant County (Fort Worth metro)
-    "tx_tarrant_absentee_owner":        TarrantAbsenteeOwnerScraper,
     # Florida — Hillsborough County
     "fl_hillsborough_foreclosure":  HillsboroughForeclosureScraper,
     "fl_hillsborough_eviction":     HillsboroughEvictionScraper,
     "fl_hillsborough_probate":      HillsboroughProbateScraper,
-    "fl_hillsborough_lis_pendens":         HillsboroughLisPendensScraper,
-    "fl_hillsborough_code_enforcement":    HillsboroughCodeEnforcementScraper,
+    "fl_hillsborough_lis_pendens":  HillsboroughLisPendensScraper,
     # Florida — Polk County
     "fl_polk_tax_deed":            PolkTaxDeedScraper,
     "fl_polk_absentee_owner":      PolkAbsenteeOwnerScraper,
-    "fl_polk_tax_delinquent_pa":   PolkTaxDelinquentScraper,
-    "fl_polk_probate":             PolkProbateScraper,
-    "fl_polk_eviction":            PolkEvictionScraper,
-    "fl_polk_foreclosure":         PolkForeclosureScraper,
-    "fl_polk_lis_pendens":         PolkLisPendensScraper,
     # California
     "ca_la_tax_delinquent":    LACountyTaxDelinquentScraper,
     "ca_nod_statewide":        CANODStatewideHelper,
-    # Rentcast listing scrapers (all counties)
-    "rentcast_dallas":         DallasRentcastScraper,
-    "rentcast_hillsborough":   HillsboroughRentcastScraper,
-    "rentcast_polk":           PolkRentcastScraper,
     # Generic platform templates
     "socrata_generic":         SocrataAPIScraper,
 }

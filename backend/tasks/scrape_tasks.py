@@ -46,10 +46,22 @@ def run_county_api_scraper(self, scraper_key: str, job_id: int | None = None, **
         scraper = get_scraper(scraper_key, config=kwargs.get("config"))
         logger.info("[%s] scraper started", scraper_key)
 
-        # Tax roll scrapers have APNs for every record — skip geocoding to avoid
-        # blocking for hours on tens-of-thousands of new addresses. A separate
-        # batch geocode job fills in coordinates afterwards.
-        skip_geocode = "tax" in scraper_key
+        # Skip geocoding for scrapers that produce placeholder addresses.
+        # Tax roll: tens of thousands of records, batch geocode runs separately.
+        # Dallas TX court scrapers use "{type} {case_num}, {town}, TX" placeholders.
+        # FL Hillsborough lis pendens uses legal description, not street address.
+        # FL Hillsborough eviction/probate DO have real defendant street addresses — geocode those.
+        _NO_GEOCODE_KEYS = {
+            "tx_dallas_lis_pendens",
+            "tx_dallas_probate",
+            "tx_dallas_divorce",
+            "tx_dallas_eviction_fed",
+            "fl_hillsborough_lis_pendens",
+            "fl_polk_lis_pendens",
+            "tx_dallas_tax_delinquent",
+            "ca_la_tax_delinquent",
+        }
+        skip_geocode = scraper_key in _NO_GEOCODE_KEYS
 
         # Run async scraper in a sync context
         async def _run():
@@ -74,9 +86,6 @@ def run_county_api_scraper(self, scraper_key: str, job_id: int | None = None, **
             scraper_key, result.found, result.upserted, result.failed,
         )
 
-        # Trigger nightly score recalculation for affected properties
-        nightly_score_decay.delay()
-
         return {"found": result.found, "upserted": result.upserted, "failed": result.failed}
 
     except Exception as exc:
@@ -85,16 +94,12 @@ def run_county_api_scraper(self, scraper_key: str, job_id: int | None = None, **
         raise self.retry(exc=exc)
 
 
-@app.task(bind=True, base=ScrapeTask, max_retries=3, default_retry_delay=300)
+@app.task(bind=True, base=ScrapeTask, queue="web_scrape", max_retries=3, default_retry_delay=300)
 def run_web_scraper(self, scraper_key: str, **kwargs):
-    """Alias for browser-based scrapers (routed to web_scrape queue)."""
-    return run_county_api_scraper.apply(args=[scraper_key], kwargs=kwargs)
-
+    """Browser-based scrapers — runs on playwright-worker via web_scrape queue."""
+    return run_county_api_scraper(self, scraper_key, **kwargs)
 
 @app.task(bind=True, base=ScrapeTask, max_retries=3, default_retry_delay=300)
 def run_mls_scraper(self, scraper_key: str, **kwargs):
     """Alias for MLS scrapers (routed to mls queue, stricter rate limits)."""
     return run_county_api_scraper.apply(args=[scraper_key], kwargs=kwargs)
-
-
-from tasks.score_tasks import nightly_score_decay  # noqa: E402 (circular-safe)
