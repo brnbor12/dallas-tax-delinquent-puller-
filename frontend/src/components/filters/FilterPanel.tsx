@@ -80,7 +80,7 @@ export function FilterPanel() {
               />
             </div>
             <div className="flex gap-2">
-              {(['hot', 'warm', 'nurture', 'cold'] as const).map((tier) => (
+              {(['hot', 'warm', 'cold'] as const).map((tier) => (
                 <button
                   key={tier}
                   onClick={() => setFilter('score_tier', filters.score_tier === tier ? '' : tier)}
@@ -90,8 +90,6 @@ export function FilterPanel() {
                         ? 'bg-red-500 text-white'
                         : tier === 'warm'
                         ? 'bg-orange-500 text-white'
-                        : tier === 'nurture'
-                        ? 'bg-yellow-500 text-white'
                         : 'bg-blue-500 text-white'
                       : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
                   }`}
