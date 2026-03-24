@@ -49,10 +49,10 @@ class IngestResult:
         self.errors: list[str] = []
 
 
-def ingest_record(session: Session, record: RawIndicatorRecord, geocode: bool = True) -> bool:
+def ingest_record(session: Session, record: RawIndicatorRecord, geocode: bool = True) -> int | None:
     """
     Ingest a single RawIndicatorRecord into the database.
-    Returns True on success, False on failure.
+    Returns the property ID on success, None on failure.
 
     geocode=False: skip geocoding — useful for bulk imports where coordinates
     can be filled in by a later batch job. Properties without coordinates are
@@ -78,7 +78,7 @@ def ingest_record(session: Session, record: RawIndicatorRecord, geocode: bool = 
         _upsert_indicator(session, prop, record)
 
         session.flush()
-        return True
+        return prop.id
 
     except Exception as exc:
         logger.error(
@@ -88,7 +88,7 @@ def ingest_record(session: Session, record: RawIndicatorRecord, geocode: bool = 
             error=str(exc),
         )
         session.rollback()
-        return False
+        return None
 
 
 def _get_or_create_county(session: Session, fips_code: str) -> County:
@@ -210,10 +210,15 @@ def _get_or_create_property(
                 pass
 
     # Skip creating placeholder properties with no real address
+    # Exception: records with a case_number (e.g. Official Records instruments)
+    # are stored as placeholders for later enrichment via parcel data.
     if not addr_norm[0:1].isdigit() and not record.apn:
-        logger.debug("ingestor_skip_no_address",
-                    address=record.address_raw, case=record.case_number)
-        raise ValueError(f"No valid address for record: {record.address_raw}")
+        if not record.case_number:
+            logger.debug("ingestor_skip_no_address",
+                        address=record.address_raw, case=record.case_number)
+            raise ValueError(f"No valid address for record: {record.address_raw}")
+        logger.debug("ingestor_placeholder_property",
+                    address=record.address_raw[:80], case=record.case_number)
 
     # Create new property
     location_wkt = f"SRID=4326;POINT({lng} {lat})" if lat and lng else None

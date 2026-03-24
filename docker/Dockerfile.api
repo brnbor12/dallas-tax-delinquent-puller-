@@ -1,10 +1,11 @@
 FROM python:3.12-slim
 
-# System dependencies for psycopg2 and pdfplumber
+# System dependencies for psycopg2, pdfplumber, and pdftotext (poppler)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libpq-dev \
     curl \
+    poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
