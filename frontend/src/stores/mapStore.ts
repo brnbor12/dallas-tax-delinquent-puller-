@@ -25,7 +25,7 @@ export const useMapStore = create<MapStore>((set) => ({
   selectedPropertyId: null,
   hoveredPropertyId: null,
   mapBounds: null,
-  mapCenter: [-96.7970, 32.7767],  // Default: Dallas TX
+  mapCenter: [-82.4572, 27.9506],  // Default: Tampa Bay FL
   mapZoom: 9,
   showHeatmap: false,
 

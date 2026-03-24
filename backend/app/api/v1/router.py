@@ -16,3 +16,9 @@ api_router.include_router(status_router)
 
 from app.api.v1.endpoints.market import router as market_router
 api_router.include_router(market_router)
+
+from app.api.v1.endpoints.pipeline import router as pipeline_router
+api_router.include_router(pipeline_router)
+
+from app.api.v1.endpoints.admin import router as admin_router
+api_router.include_router(admin_router)

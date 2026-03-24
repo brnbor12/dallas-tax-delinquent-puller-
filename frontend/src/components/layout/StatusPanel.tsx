@@ -24,8 +24,9 @@ const fmt = (n: number) => n.toLocaleString()
 export function StatusPanel({ onClose }: { onClose: () => void }) {
   const [data, setData] = useState<StatusData | null>(null)
   const [loading, setLoading] = useState(true)
-  const [tab, setTab] = useState<'overview' | 'scrapers'>('overview')
+  const [tab, setTab] = useState<'overview' | 'scrapers' | 'actions'>('overview')
   const [showAllStates, setShowAllStates] = useState(false)
+  const [actionState, setActionState] = useState<{ running: string | null; result: string | null }>({ running: null, result: null })
 
   useEffect(() => {
     apiClient.get<StatusData>('/status').then(r => { setData(r.data); setLoading(false) })
@@ -45,7 +46,7 @@ export function StatusPanel({ onClose }: { onClose: () => void }) {
         <div className="flex items-center gap-4">
           <span className="text-sm font-semibold text-gray-900">Pipeline Status</span>
           <div className="flex gap-1 bg-gray-100 rounded-lg p-0.5">
-            {(['overview', 'scrapers'] as const).map(t => (
+            {(['overview', 'scrapers', 'actions'] as const).map(t => (
               <button key={t} onClick={() => setTab(t)}
                 className={`px-3 py-1 text-xs rounded-md font-medium capitalize transition-colors ${tab === t ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
                 {t}
@@ -173,7 +174,7 @@ export function StatusPanel({ onClose }: { onClose: () => void }) {
           <table className="w-full text-xs border-collapse">
             <thead className="sticky top-0 bg-gray-50 border-b border-gray-200">
               <tr>
-                {['Scraper', 'County', 'Signal', 'Freq', 'Last result', 'Status'].map(h => (
+                {['Scraper', 'County', 'Signal', 'Freq', 'Last result', 'Status', ''].map(h => (
                   <th key={h} className="text-left px-4 py-2.5 text-gray-400 font-semibold uppercase tracking-wide whitespace-nowrap">{h}</th>
                 ))}
               </tr>
@@ -187,11 +188,131 @@ export function StatusPanel({ onClose }: { onClose: () => void }) {
                   <td className="px-4 py-2.5"><span className="bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded">{s.freq}</span></td>
                   <td className="px-4 py-2.5 font-mono text-gray-400 max-w-xs truncate">{s.last_result}</td>
                   <td className="px-4 py-2.5"><span className={`px-2 py-0.5 rounded text-xs font-medium ${BADGE[s.status] || 'bg-gray-100 text-gray-500'}`}>{s.status}</span></td>
+                  <td className="px-4 py-2.5">
+                    {s.status !== 'disabled' && (
+                      <button
+                        onClick={async () => {
+                          setActionState({ running: s.key, result: null })
+                          try {
+                            const r = await apiClient.post(`/admin/run-scraper/${s.key}`)
+                            setActionState({ running: null, result: `${s.key}: queued (task ${r.data.task_id.slice(0,8)})` })
+                          } catch { setActionState({ running: null, result: `${s.key}: failed to queue` }) }
+                        }}
+                        disabled={actionState.running === s.key}
+                        className="text-xs text-indigo-600 hover:text-indigo-800 font-medium disabled:opacity-50"
+                      >
+                        {actionState.running === s.key ? 'Queuing…' : 'Run'}
+                      </button>
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
+          {actionState.result && (
+            <div className="px-4 py-2 bg-green-50 border-t border-green-100 text-xs text-green-700 font-mono">{actionState.result}</div>
+          )}
         </div>
+      )}
+
+      {tab === 'actions' && (
+        <div className="flex-1 overflow-y-auto p-5 space-y-6">
+          <div>
+            <div className="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-3">Bulk Operations</div>
+            <div className="space-y-3">
+              <ActionButton
+                label="Recalculate All Scores"
+                description="Recomputes every property score using current weights and thresholds. Updates tiers and refreshes the dashboard. Takes ~30 seconds."
+                endpoint="/admin/recalculate-scores"
+                actionState={actionState}
+                setActionState={setActionState}
+                formatResult={(d) => `Updated ${fmt(d.updated)} properties — Hot: ${fmt(d.tiers?.hot || 0)} · Warm: ${fmt(d.tiers?.warm || 0)} · Cold: ${fmt(d.tiers?.cold || 0)}`}
+              />
+              <ActionButton
+                label="Refresh Dashboard Stats"
+                description="Refreshes the materialized view that powers the pipeline status and market stats. Run after imports or manual DB changes."
+                endpoint="/admin/refresh-stats"
+                actionState={actionState}
+                setActionState={setActionState}
+                formatResult={() => 'Materialized view refreshed'}
+              />
+            </div>
+          </div>
+          <div>
+            <div className="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-3">Run Scraper</div>
+            <div className="flex gap-2 items-end">
+              <div className="flex-1">
+                <label className="text-xs text-gray-500 block mb-1">Scraper key</label>
+                <input
+                  id="scraper-key-input"
+                  type="text"
+                  placeholder="e.g. fl_polk_official_records"
+                  className="w-full h-8 px-3 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent font-mono"
+                />
+              </div>
+              <button
+                onClick={async () => {
+                  const input = document.getElementById('scraper-key-input') as HTMLInputElement
+                  const key = input?.value.trim()
+                  if (!key) return
+                  setActionState({ running: key, result: null })
+                  try {
+                    const r = await apiClient.post(`/admin/run-scraper/${key}`)
+                    setActionState({ running: null, result: `Queued ${key} — task ${r.data.task_id.slice(0,8)}` })
+                  } catch {
+                    setActionState({ running: null, result: `Failed to queue ${key}` })
+                  }
+                }}
+                disabled={!!actionState.running}
+                className="h-8 px-4 text-sm font-medium bg-indigo-600 text-white rounded-md hover:bg-indigo-700 disabled:opacity-50 whitespace-nowrap"
+              >
+                {actionState.running ? 'Queuing…' : 'Run'}
+              </button>
+            </div>
+            {actionState.result && (
+              <div className="mt-2 px-3 py-2 bg-green-50 border border-green-100 rounded-md text-xs text-green-700 font-mono">{actionState.result}</div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ActionButton({ label, description, endpoint, actionState, setActionState, formatResult }: {
+  label: string
+  description: string
+  endpoint: string
+  actionState: { running: string | null; result: string | null }
+  setActionState: (s: { running: string | null; result: string | null }) => void
+  formatResult: (data: any) => string
+}) {
+  const isRunning = actionState.running === endpoint
+  return (
+    <div className="border border-gray-200 rounded-lg p-4">
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex-1">
+          <div className="text-sm font-semibold text-gray-900">{label}</div>
+          <div className="text-xs text-gray-500 mt-0.5">{description}</div>
+        </div>
+        <button
+          onClick={async () => {
+            setActionState({ running: endpoint, result: null })
+            try {
+              const r = await apiClient.post(endpoint)
+              setActionState({ running: null, result: formatResult(r.data) })
+            } catch {
+              setActionState({ running: null, result: `Failed: ${endpoint}` })
+            }
+          }}
+          disabled={!!actionState.running}
+          className="flex-shrink-0 h-8 px-4 text-sm font-medium bg-indigo-600 text-white rounded-md hover:bg-indigo-700 disabled:opacity-50 whitespace-nowrap"
+        >
+          {isRunning ? 'Running…' : 'Execute'}
+        </button>
+      </div>
+      {actionState.result && actionState.running === null && (
+        <div className="mt-3 px-3 py-2 bg-green-50 border border-green-100 rounded-md text-xs text-green-700 font-mono">{actionState.result}</div>
       )}
     </div>
   )
